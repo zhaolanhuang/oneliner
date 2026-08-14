@@ -103,7 +103,7 @@ fn run_iree_compile_with_cmsis_nn(
     let configured = artifact_dir.join("cmsis-nn.configured.mlir");
     let lowered = artifact_dir.join("cmsis-nn.lowered.mlir");
     let finalized = artifact_dir.join("cmsis-nn.finalized.mlir");
-    let bitcode = artifact_dir.join("oneliner_cmsis_nn_conv_s8.bc");
+    let bitcode = artifact_dir.join("oneliner_cmsis_nn.bc");
     let macro_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_dir = macro_dir.parent().ok_or_else(|| {
         syn::Error::new(Span::call_site(), "oneliner-macro has no workspace parent")
@@ -134,7 +134,7 @@ fn run_iree_compile_with_cmsis_nn(
     run_python_filter(&rewriter, &preprocessing, &rewritten, &[])?;
     let rewritten_text = std::fs::read_to_string(&rewritten)
         .map_err(|error| syn::Error::new(Span::call_site(), error))?;
-    if !rewritten_text.contains("oneliner_cmsis_nn_conv_s8") {
+    if !rewritten_text.contains("oneliner_cmsis_nn_") {
         return run_standard_iree_compile(
             compile_input,
             vmfb,

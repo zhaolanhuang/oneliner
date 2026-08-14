@@ -172,7 +172,7 @@ Each example is an independent Cargo project. Run its commands from the example 
 | [Desktop IREE](examples/std-iree/) | The shortest end-to-end validation path on a standard host | Quantized MCUNet visual wake word |
 | [Ariel OS + IREE](examples/ariel-os-iree/) | `no_std`, Ariel OS threads, native-board validation, and inference timing | Quantized LeNet5 |
 | [Embassy + IREE on Pico](examples/embassy-pico-iree/) | Bare-metal RP2040, shared model workspace, static input storage, and `defmt` logging | Quantized LeNet5 |
-| [LeNet5 + CMSIS-NN](examples/lenet5-cmsis-nn/) | Cortex-M4 cross-compilation and verification of CMSIS-NN int8 Conv2D ukernels | Quantized LeNet5 |
+| [LeNet5 + CMSIS-NN](examples/lenet5-cmsis-nn/) | Cortex-M4 cross-compilation and verification of CMSIS-NN int8 ukernels | Quantized LeNet5 |
 
 Start with the [desktop example](examples/std-iree/) to confirm the model toolchain, then move to the operating system or board example that matches your target.
 
@@ -223,7 +223,7 @@ CMSIS-NN lowering is disabled by default. Enable it per model on a supported Cor
 struct MyModel;
 ```
 
-Supported static int8 Conv2D operations use CMSIS-NN ukernels; other operations retain their normal IREE LLVMCPU lowering. Set `cmsis_nn = false` or omit the option to build the standard IREE implementation for differential testing. See the [LeNet5 CMSIS-NN example](examples/lenet5-cmsis-nn/) for the complete Cortex-M4F setup.
+Supported static int8 Conv2D, depthwise Conv2D, MaxPool, and fully connected forms use CMSIS-NN ukernels; other operations retain their normal IREE LLVMCPU lowering. Depthwise Conv2D currently requires batch size 1, channel multiplier 1, unit dilation, and symmetric weights. Set `cmsis_nn = false` or omit the option to build the standard IREE implementation for differential testing. See the [LeNet5 CMSIS-NN example](examples/lenet5-cmsis-nn/) for the complete Cortex-M4F setup.
 
 
 ## Project Status

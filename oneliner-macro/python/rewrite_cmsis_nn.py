@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rewrites supported quantized Conv2D dispatches to a CMSIS-NN ukernel."""
+"""Rewrites supported quantized operations to CMSIS-NN ukernels."""
 
 from __future__ import annotations
 
@@ -10,10 +10,43 @@ from dataclasses import dataclass
 
 
 SSA = r"%[A-Za-z0-9_.$-]+"
+BITCODE_PATH = "oneliner_cmsis_nn.bc"
+UKERNEL_NAMES = (
+    "oneliner_cmsis_nn_conv_s8",
+    "oneliner_cmsis_nn_max_pool_s8",
+    "oneliner_cmsis_nn_fully_connected_s8",
+    "oneliner_cmsis_nn_depthwise_conv_s8",
+)
 
 
 @dataclass(frozen=True)
 class ConvMatch:
+    result: str
+    input_value: str
+    filter_value: str
+    input_zero_point: int
+    init_value: str
+    input_type: str
+    filter_type: str
+    accumulator_type: str
+    stride: tuple[int, int]
+    dilation: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class PoolMatch:
+    result: str
+    input_value: str
+    init_value: str
+    input_type: str
+    window_type: str
+    output_type: str
+    stride: tuple[int, int]
+    dilation: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class DepthwiseMatch:
     result: str
     input_value: str
     filter_value: str
@@ -113,6 +146,65 @@ def find_conv(line: str, constants: dict[str, int]) -> ConvMatch | None:
     )
 
 
+def find_pool(line: str) -> PoolMatch | None:
+    pattern = re.compile(
+        rf"^\s*({SSA})\s*=\s*linalg\.pooling_nhwc_max\s*"
+        rf"(?P<attrs>\{{.*?\}})\s*ins\("
+        rf"({SSA}),\s*({SSA})\s*:\s*(tensor<[^>]+>),\s*(tensor<[^>]+>)\)\s*"
+        rf"outs\(({SSA})\s*:\s*(tensor<[^>]+>)\)"
+    )
+    match = pattern.match(line)
+    if not match:
+        return None
+    stride = parse_pair(match.group("attrs"), "strides")
+    dilation = parse_pair(match.group("attrs"), "dilations")
+    if stride is None or dilation is None:
+        return None
+    return PoolMatch(
+        result=match.group(1),
+        input_value=match.group(3),
+        init_value=match.group(7),
+        input_type=match.group(5),
+        window_type=match.group(6),
+        output_type=match.group(8),
+        stride=stride,
+        dilation=dilation,
+    )
+
+
+def find_depthwise(
+    line: str, constants: dict[str, int]
+) -> DepthwiseMatch | None:
+    pattern = re.compile(
+        rf"^\s*({SSA})\s*=\s*linalg\.depthwise_conv_2d_nhwc_hwcm_q\s*"
+        rf"(?P<attrs>\{{.*?\}})\s*ins\("
+        rf"({SSA}),\s*({SSA}),\s*({SSA}),\s*({SSA})\s*:\s*"
+        rf"(tensor<[^>]+>),\s*(tensor<[^>]+>),\s*i32,\s*i32\)\s*"
+        rf"outs\(({SSA})\s*:\s*(tensor<[^>]+>)\)"
+    )
+    match = pattern.match(line)
+    if not match:
+        return None
+    input_zp = resolve_scalar(match.group(5), constants)
+    filter_zp = resolve_scalar(match.group(6), constants)
+    stride = parse_pair(match.group("attrs"), "strides")
+    dilation = parse_pair(match.group("attrs"), "dilations")
+    if input_zp is None or filter_zp != 0 or stride is None or dilation is None:
+        return None
+    return DepthwiseMatch(
+        result=match.group(1),
+        input_value=match.group(3),
+        filter_value=match.group(4),
+        input_zero_point=input_zp,
+        init_value=match.group(9),
+        input_type=match.group(7),
+        filter_type=match.group(8),
+        accumulator_type=match.group(10),
+        stride=stride,
+        dilation=dilation,
+    )
+
+
 def defining_op(lines: list[str], value: str, before: int) -> int | None:
     pattern = re.compile(rf"^\s*{re.escape(value)}\s*=")
     for index in range(before - 1, -1, -1):
@@ -196,11 +288,171 @@ def dense_definition(lines: list[str], value: str, before: int) -> tuple[list[in
     producer = defining_op(lines, value, before)
     if producer is None:
         return None
-    values = parse_dense_ints(lines[producer])
-    type_match = re.search(r":\s*(tensor<[^>]+>)\s*$", lines[producer])
-    if values is None or not type_match:
+    line = lines[producer]
+    type_match = re.search(r":\s*(tensor<[^>]+>)\s*$", line)
+    if not type_match:
         return None
+    values = parse_dense_ints(line)
+    if values is None:
+        tensor_type = type_match.group(1)
+        shape = parse_shape(tensor_type)
+        element_match = re.search(r"x(i8|i32)>", tensor_type)
+        hex_match = re.search(r'dense<"0x([0-9A-Fa-f]*)">', line)
+        if shape is None or not element_match or not hex_match:
+            return None
+        count = 1
+        for dimension in shape:
+            count *= dimension
+        width = 1 if element_match.group(1) == "i8" else 4
+        data = bytes.fromhex(hex_match.group(1))
+        if len(data) != count * width:
+            return None
+        values = [
+            int.from_bytes(data[index:index + width], "little", signed=True)
+            for index in range(0, len(data), width)
+        ]
     return values, type_match.group(1)
+
+
+def dense_bytes_definition(lines: list[str], value: str, before: int) -> bytes | None:
+    producer = defining_op(lines, value, before)
+    if producer is None:
+        return None
+    line = lines[producer]
+    type_match = re.search(r":\s*(tensor<[^>]+>)\s*$", line)
+    if not type_match:
+        return None
+    tensor_type = type_match.group(1)
+    shape = parse_shape(tensor_type)
+    element_match = re.search(r"x(i8|i32)>", tensor_type)
+    if shape is None or not element_match:
+        return None
+    count = 1
+    for dimension in shape:
+        count *= dimension
+    hex_match = re.search(r'dense<"0x([0-9A-Fa-f]*)">', line)
+    if hex_match:
+        data = bytes.fromhex(hex_match.group(1))
+    else:
+        values = parse_dense_ints(line)
+        if values is None:
+            return None
+        width = 1 if element_match.group(1) == "i8" else 4
+        data = b"".join(
+            (value & ((1 << (width * 8)) - 1)).to_bytes(width, "little")
+            for value in values
+        )
+    expected_size = count * (1 if element_match.group(1) == "i8" else 4)
+    return data if len(data) == expected_size else None
+
+
+def fill_scalar(
+    lines: list[str], value: str, before: int, constants: dict[str, int]
+) -> int | None:
+    producer = defining_op(lines, value, before)
+    if producer is None:
+        return None
+    match = re.search(
+        rf"linalg\.fill\s+ins\(({SSA})\s*:\s*i(?:8|32)\)", lines[producer]
+    )
+    return resolve_scalar(match.group(1), constants) if match else None
+
+
+def scalar_requant_match(
+    lines: list[str], conv: ConvMatch, start: int, constants: dict[str, int]
+) -> tuple[int, int, str, str, str, int, int, int, int, int] | None:
+    use_pattern = re.compile(
+        rf"^\s*({SSA})\s*=\s*linalg\.generic\s+.*ins\("
+        rf"{re.escape(conv.result)}\s*:\s*{re.escape(conv.accumulator_type)}\)\s*"
+        rf"outs\(({SSA})\s*:\s*(tensor<[^>]+>)\)"
+    )
+    for index in range(start + 1, len(lines)):
+        match = use_pattern.match(lines[index])
+        if not match:
+            continue
+        end = block_end(lines, index)
+        body = "\n".join(lines[index:end])
+        multiplier_match = re.search(
+            rf"arith\.muli\s+{SSA},\s*({SSA})\s*:\s*i64", body
+        )
+        shift_match = re.search(
+            rf"arith\.shrsi\s+{SSA},\s*({SSA})\s*:\s*i64", body
+        )
+        offset_match = re.search(
+            rf"({SSA})\s*=\s*arith\.addi\s+{SSA},\s*({SSA})\s*:\s*i32\s*\n\s*"
+            rf"({SSA})\s*=\s*arith\.maxsi\s+\1,\s*({SSA})\s*:\s*i32\s*\n\s*"
+            rf"{SSA}\s*=\s*arith\.minsi\s+\3,\s*({SSA})\s*:\s*i32",
+            body,
+        )
+        if not multiplier_match or not shift_match or not offset_match:
+            continue
+        multiplier = resolve_scalar(multiplier_match.group(1), constants)
+        shift = resolve_scalar(shift_match.group(1), constants)
+        output_offset = resolve_scalar(offset_match.group(2), constants)
+        activation_min = resolve_scalar(offset_match.group(4), constants)
+        activation_max = resolve_scalar(offset_match.group(5), constants)
+        if None in (multiplier, shift, output_offset, activation_min, activation_max):
+            continue
+        return (
+            index,
+            end,
+            match.group(1),
+            match.group(2),
+            match.group(3),
+            int(multiplier),
+            int(shift),
+            int(output_offset),
+            int(activation_min),
+            int(activation_max),
+        )
+    return None
+
+
+def depthwise_requant_match(
+    lines: list[str], depthwise: DepthwiseMatch, start: int, constants: dict[str, int]
+) -> tuple[str, str, tuple[int, int, str, str, str, str, str, str, str, int, int, int]] | None:
+    collapse_pattern = re.compile(
+        rf"^\s*({SSA})\s*=\s*tensor\.collapse_shape\s+"
+        rf"{re.escape(depthwise.result)}\s+.*:\s*"
+        rf"{re.escape(depthwise.accumulator_type)}\s+into\s+(tensor<[^>]+>)"
+    )
+    for collapse_index in range(start + 1, len(lines)):
+        collapse_match = collapse_pattern.match(lines[collapse_index])
+        if not collapse_match:
+            continue
+        collapsed_value = collapse_match.group(1)
+        collapsed_type = collapse_match.group(2)
+        bias_pattern = re.compile(
+            rf"^\s*({SSA})\s*=\s*linalg\.generic\s+.*ins\("
+            rf"({SSA}),\s*{re.escape(collapsed_value)}\s*:\s*"
+            rf"(tensor<[^>]+>),\s*{re.escape(collapsed_type)}\)\s*"
+            rf"outs\(({SSA})\s*:\s*{re.escape(collapsed_type)}\)"
+        )
+        for bias_index in range(collapse_index + 1, len(lines)):
+            bias_match = bias_pattern.match(lines[bias_index])
+            if not bias_match:
+                continue
+            bias_end = block_end(lines, bias_index)
+            if "arith.addi" not in "\n".join(lines[bias_index:bias_end]):
+                continue
+            requant_source = ConvMatch(
+                result=bias_match.group(1),
+                input_value="",
+                filter_value="",
+                input_zero_point=0,
+                init_value="",
+                input_type="",
+                filter_type="",
+                accumulator_type=collapsed_type,
+                stride=(1, 1),
+                dilation=(1, 1),
+            )
+            requant = requant_match(lines, requant_source, bias_index, constants)
+            if requant is not None:
+                return bias_match.group(2), bias_match.group(3), requant
+            break
+        break
+    return None
 
 
 def rewrite(text: str) -> tuple[str, int]:
@@ -218,14 +470,109 @@ def rewrite(text: str) -> tuple[str, int]:
         accumulator_shape = parse_shape(conv.accumulator_type)
         filter_source = original_filter(lines, conv, conv_index)
         bias = broadcast_bias(lines, conv, conv_index)
-        requant = requant_match(lines, conv, conv_index, constants)
         if (
             input_shape is None or len(input_shape) != 4
             or filter_shape is None or len(filter_shape) != 4
             or accumulator_shape is None or len(accumulator_shape) != 4
             or input_shape[0] != 1 or filter_source is None or bias is None
-            or requant is None
         ):
+            continue
+
+        source_filter_value, source_filter_type = filter_source
+        source_filter_shape = parse_shape(source_filter_type)
+        bias_value, bias_type = bias
+        bias_shape = parse_shape(bias_type)
+        source_filter_bytes = dense_bytes_definition(
+            lines, source_filter_value, conv_index
+        )
+        bias_bytes = dense_bytes_definition(lines, bias_value, conv_index)
+        scalar_requant = scalar_requant_match(lines, conv, conv_index, constants)
+        if scalar_requant is not None:
+            (
+                req_start, req_end, result, output_init, output_type,
+                multiplier, shift, output_offset, activation_min, activation_max,
+            ) = scalar_requant
+            output_shape = parse_shape(output_type)
+            if (
+                input_shape[1:3] == (1, 1)
+                and filter_shape[0:2] == (1, 1)
+                and accumulator_shape == output_shape
+                and output_shape is not None
+                and len(output_shape) == 4
+                and output_shape[1:3] == (1, 1)
+                and source_filter_shape
+                == (output_shape[3], 1, 1, input_shape[3])
+                and bias_shape == (output_shape[3],)
+                and conv.stride == (1, 1)
+                and conv.dilation == (1, 1)
+                and source_filter_bytes is not None
+                and bias_bytes is not None
+            ):
+                prefix = f"cmsis_nn_{rewritten}"
+                bias_byte_offset = (len(source_filter_bytes) + 3) & ~3
+                packed_params = (
+                    source_filter_bytes
+                    + bytes(bias_byte_offset - len(source_filter_bytes))
+                    + bias_bytes
+                )
+                packed_hex = packed_params.hex().upper()
+                config_values = [
+                    input_shape[0], input_shape[3], output_shape[3],
+                    -conv.input_zero_point, 0, output_offset, multiplier,
+                    31 - shift, activation_min, activation_max, bias_byte_offset,
+                ]
+                indent = re.match(r"\s*", lines[req_start]).group(0)
+                generated = [
+                    f'{indent}%{prefix}_params = arith.constant dense<"0x{packed_hex}"> : tensor<{len(packed_params)}xi8>',
+                    f"{indent}%{prefix}_config = arith.constant dense<{config_values}> : tensor<11xi32>",
+                    f"{indent}%{prefix}_scratch = tensor.empty() : tensor<1xi8>",
+                ]
+                tensor_values = [
+                    conv.input_value,
+                    f"%{prefix}_params",
+                    f"%{prefix}_scratch",
+                    f"%{prefix}_config",
+                ]
+                tensor_types = [
+                    conv.input_type,
+                    f"tensor<{len(packed_params)}xi8>",
+                    "tensor<1xi8>",
+                    "tensor<11xi32>",
+                ]
+                symbols = ", ".join(f"s{index}" for index in range(10))
+                maps = [
+                    f"affine_map<()[{symbols}] -> (s0, s4, s5, s6)>",
+                    f"affine_map<()[{symbols}] -> (s7)>",
+                    f"affine_map<()[{symbols}] -> (s8)>",
+                    f"affine_map<()[{symbols}] -> (s9)>",
+                    f"affine_map<()[{symbols}] -> (s0, s1, s2, s3)>",
+                ]
+                region_types = [
+                    "tensor<?x?x?x?xi8>",
+                    "tensor<?xi8>",
+                    "tensor<?xi8>",
+                    "tensor<?xi32>",
+                    "tensor<?x?x?x?xi8>",
+                ]
+                generated.extend([
+                    f'{indent}{result} = iree_linalg_ext.custom_op {{indexing_maps = [{", ".join(maps)}], '
+                    f'iterator_types = []}} attributes {{'
+                    f'iree_codegen.ukernel = #iree_codegen.ukernel_descriptor<"oneliner_cmsis_nn_fully_connected_s8", bitcode>, '
+                    f'hal.executable.objects = [#hal.executable.object<{{path = "{BITCODE_PATH}"}}>]}} '
+                    f'ins({", ".join(tensor_values)} : {", ".join(tensor_types)}) '
+                    f'outs({output_init} : {output_type}) {{',
+                    f'{indent}^bb0(%input: {region_types[0]}, %params: {region_types[1]}, '
+                    f'%scratch: {region_types[2]}, %config: {region_types[3]}, '
+                    f'%out: {region_types[4]}):',
+                    f"{indent}  iree_linalg_ext.yield %out : {region_types[4]}",
+                    f"{indent}}} -> {output_type}",
+                ])
+                replacements.append((req_start, req_end, generated))
+                rewritten += 1
+                continue
+
+        requant = requant_match(lines, conv, conv_index, constants)
+        if requant is None:
             continue
 
         (
@@ -246,9 +593,6 @@ def rewrite(text: str) -> tuple[str, int]:
         if len(shift_values) != output_shape[3] or multiplier_shape != (output_shape[3],):
             continue
 
-        source_filter_value, source_filter_type = filter_source
-        source_filter_shape = parse_shape(source_filter_type)
-        bias_value, bias_type = bias
         if source_filter_shape != (output_shape[3], filter_shape[0], filter_shape[1], input_shape[3]):
             continue
 
@@ -308,7 +652,7 @@ def rewrite(text: str) -> tuple[str, int]:
             f'{indent}{result} = iree_linalg_ext.custom_op {{indexing_maps = [{", ".join(maps)}], '
             f'iterator_types = []}} attributes {{'
             f'iree_codegen.ukernel = #iree_codegen.ukernel_descriptor<"oneliner_cmsis_nn_conv_s8", bitcode>, '
-            f'hal.executable.objects = [#hal.executable.object<{{path = "oneliner_cmsis_nn_conv_s8.bc"}}>]}} '
+            f'hal.executable.objects = [#hal.executable.object<{{path = "oneliner_cmsis_nn.bc"}}>]}} '
             f'ins({", ".join(tensor_values)} : {", ".join(tensor_types)}) '
             f'outs({output_init} : {output_type}) {{',
             f'{indent}^bb0(%input: {region_types[0]}, %filter: {region_types[1]}, '
@@ -321,27 +665,217 @@ def rewrite(text: str) -> tuple[str, int]:
         replacements.append((req_start, req_end, generated))
         rewritten += 1
 
-    for start, end, generated in reversed(replacements):
+    for depthwise_index, line in enumerate(lines):
+        depthwise = find_depthwise(line, constants)
+        if depthwise is None:
+            continue
+        input_shape = parse_shape(depthwise.input_type)
+        filter_shape = parse_shape(depthwise.filter_type)
+        accumulator_shape = parse_shape(depthwise.accumulator_type)
+        chain = depthwise_requant_match(
+            lines, depthwise, depthwise_index, constants
+        )
+        if (
+            input_shape is None
+            or len(input_shape) != 4
+            or filter_shape is None
+            or len(filter_shape) != 4
+            or accumulator_shape is None
+            or len(accumulator_shape) != 5
+            or input_shape[0] != 1
+            or filter_shape[2] != input_shape[3]
+            or filter_shape[3] != 1
+            or accumulator_shape[0] != 1
+            or accumulator_shape[3:] != (input_shape[3], 1)
+            or depthwise.dilation != (1, 1)
+            or fill_scalar(lines, depthwise.init_value, depthwise_index, constants) != 0
+            or chain is None
+        ):
+            continue
+        bias_value, bias_type, requant = chain
+        (
+            req_start, req_end, result, multiplier, multiplier_type, shift,
+            shift_type, output_init, output_type, output_offset, activation_min,
+            activation_max,
+        ) = requant
+        output_shape = parse_shape(output_type)
+        bias_shape = parse_shape(bias_type)
+        multiplier_shape = parse_shape(multiplier_type)
+        shift_def = dense_definition(lines, shift, req_start)
+        if (
+            output_shape != accumulator_shape[:4]
+            or bias_shape != (output_shape[3],)
+            or multiplier_shape != (output_shape[3],)
+            or shift_def is None
+        ):
+            continue
+        shift_values, parsed_shift_type = shift_def
+        if parsed_shift_type != shift_type or len(shift_values) != output_shape[3]:
+            continue
+        filter_bytes = dense_bytes_definition(
+            lines, depthwise.filter_value, depthwise_index
+        )
+        bias_bytes = dense_bytes_definition(lines, bias_value, req_start)
+        multiplier_bytes = dense_bytes_definition(lines, multiplier, req_start)
+        if filter_bytes is None or bias_bytes is None or multiplier_bytes is None:
+            continue
+        cmsis_shifts = [31 - value for value in shift_values]
+        shift_bytes = b"".join(
+            (value & 0xFFFFFFFF).to_bytes(4, "little") for value in cmsis_shifts
+        )
+        bias_byte_offset = (len(filter_bytes) + 3) & ~3
+        multiplier_byte_offset = bias_byte_offset + len(bias_bytes)
+        shift_byte_offset = multiplier_byte_offset + len(multiplier_bytes)
+        packed_params = (
+            filter_bytes
+            + bytes(bias_byte_offset - len(filter_bytes))
+            + bias_bytes
+            + multiplier_bytes
+            + shift_bytes
+        )
+        stride_h, stride_w = depthwise.stride
+        filter_h, filter_w = filter_shape[:2]
+        total_pad_h = max(
+            0,
+            (output_shape[1] - 1) * stride_h + filter_h - input_shape[1],
+        )
+        total_pad_w = max(
+            0,
+            (output_shape[2] - 1) * stride_w + filter_w - input_shape[2],
+        )
+        if total_pad_h % 2 or total_pad_w % 2:
+            continue
+        pad_h, pad_w = total_pad_h // 2, total_pad_w // 2
+        uses_3x3 = filter_shape[:2] == (3, 3) and pad_h <= 1 and pad_w <= 1
+        scratch_size = 0 if uses_3x3 else 2 * input_shape[3] * filter_h * filter_w
+        scratch_len = max(1, scratch_size)
+        config_values = [
+            input_shape[0], input_shape[1], input_shape[2], input_shape[3],
+            output_shape[1], output_shape[2], output_shape[3], filter_h,
+            filter_w, stride_h, stride_w, 1, 1, pad_h, pad_w,
+            -depthwise.input_zero_point, output_offset, activation_min,
+            activation_max, 1, bias_byte_offset, multiplier_byte_offset,
+            shift_byte_offset, scratch_size,
+        ]
+        prefix = f"cmsis_nn_{rewritten}"
+        indent = re.match(r"\s*", lines[req_start]).group(0)
+        packed_hex = packed_params.hex().upper()
+        symbols = ", ".join(f"s{index}" for index in range(9))
+        maps = [
+            f"affine_map<()[{symbols}] -> (s0, s4, s5, s3)>",
+            f"affine_map<()[{symbols}] -> (s6)>",
+            f"affine_map<()[{symbols}] -> (s7)>",
+            f"affine_map<()[{symbols}] -> (s8)>",
+            f"affine_map<()[{symbols}] -> (s0, s1, s2, s3)>",
+        ]
+        generated = [
+            f'{indent}%{prefix}_params = arith.constant dense<"0x{packed_hex}"> : tensor<{len(packed_params)}xi8>',
+            f"{indent}%{prefix}_config = arith.constant dense<{config_values}> : tensor<24xi32>",
+            f"{indent}%{prefix}_scratch = tensor.empty() : tensor<{scratch_len}xi8>",
+            f'{indent}{result} = iree_linalg_ext.custom_op {{indexing_maps = [{", ".join(maps)}], '
+            f'iterator_types = []}} attributes {{'
+            f'iree_codegen.ukernel = #iree_codegen.ukernel_descriptor<"oneliner_cmsis_nn_depthwise_conv_s8", bitcode>, '
+            f'hal.executable.objects = [#hal.executable.object<{{path = "{BITCODE_PATH}"}}>]}} '
+            f'ins({depthwise.input_value}, %{prefix}_params, %{prefix}_scratch, %{prefix}_config : '
+            f'{depthwise.input_type}, tensor<{len(packed_params)}xi8>, '
+            f'tensor<{scratch_len}xi8>, tensor<24xi32>) '
+            f'outs({output_init} : {output_type}) {{',
+            f'{indent}^bb0(%input: tensor<?x?x?x?xi8>, %params: tensor<?xi8>, '
+            f'%scratch: tensor<?xi8>, %config: tensor<?xi32>, '
+            f'%out: tensor<?x?x?x?xi8>):',
+            f"{indent}  iree_linalg_ext.yield %out : tensor<?x?x?x?xi8>",
+            f"{indent}}} -> {output_type}",
+        ]
+        replacements.append((req_start, req_end, generated))
+        rewritten += 1
+
+    for pool_index, line in enumerate(lines):
+        pool = find_pool(line)
+        if pool is None:
+            continue
+        input_shape = parse_shape(pool.input_type)
+        window_shape = parse_shape(pool.window_type)
+        output_shape = parse_shape(pool.output_type)
+        if (
+            input_shape is None
+            or len(input_shape) != 4
+            or window_shape is None
+            or len(window_shape) != 2
+            or output_shape is None
+            or len(output_shape) != 4
+            or input_shape[0] != output_shape[0]
+            or input_shape[3] != output_shape[3]
+            or pool.dilation != (1, 1)
+            or fill_scalar(lines, pool.init_value, pool_index, constants) != -128
+        ):
+            continue
+        stride_h, stride_w = pool.stride
+        window_h, window_w = window_shape
+        total_pad_h = max(
+            0, (output_shape[1] - 1) * stride_h + window_h - input_shape[1]
+        )
+        total_pad_w = max(
+            0, (output_shape[2] - 1) * stride_w + window_w - input_shape[2]
+        )
+        if total_pad_h % 2 or total_pad_w % 2:
+            continue
+        pad_h, pad_w = total_pad_h // 2, total_pad_w // 2
+        prefix = f"cmsis_nn_{rewritten}"
+        config_values = [
+            input_shape[0], input_shape[1], input_shape[2], input_shape[3],
+            output_shape[1], output_shape[2], window_h, window_w,
+            stride_h, stride_w, pad_h, pad_w, -128, 127,
+        ]
+        indent = re.match(r"\s*", line).group(0)
+        symbols = ", ".join(f"s{index}" for index in range(7))
+        maps = [
+            f"affine_map<()[{symbols}] -> (s0, s4, s5, s3)>",
+            f"affine_map<()[{symbols}] -> (s6)>",
+            f"affine_map<()[{symbols}] -> (s0, s1, s2, s3)>",
+        ]
+        generated = [
+            f"{indent}%{prefix}_config = arith.constant dense<{config_values}> : tensor<14xi32>",
+            f'{indent}{pool.result} = iree_linalg_ext.custom_op {{indexing_maps = [{", ".join(maps)}], '
+            f'iterator_types = []}} attributes {{'
+            f'iree_codegen.ukernel = #iree_codegen.ukernel_descriptor<"oneliner_cmsis_nn_max_pool_s8", bitcode>, '
+            f'hal.executable.objects = [#hal.executable.object<{{path = "{BITCODE_PATH}"}}>]}} '
+            f'ins({pool.input_value}, %{prefix}_config : {pool.input_type}, tensor<14xi32>) '
+            f'outs({pool.init_value} : {pool.output_type}) {{',
+            f'{indent}^bb0(%input: tensor<?x?x?x?xi8>, %config: tensor<?xi32>, '
+            f'%out: tensor<?x?x?x?xi8>):',
+            f"{indent}  iree_linalg_ext.yield %out : tensor<?x?x?x?xi8>",
+            f"{indent}}} -> {pool.output_type}",
+        ]
+        replacements.append((pool_index, pool_index + 1, generated))
+        rewritten += 1
+
+    for start, end, generated in sorted(
+        replacements, key=lambda replacement: replacement[0], reverse=True
+    ):
         lines[start:end] = generated
     return "\n".join(lines) + ("\n" if text.endswith("\n") else ""), rewritten
 
 
 def finalize_configured(text: str) -> tuple[str, int]:
-    descriptor = (
-        '{iree_codegen.ukernel = #iree_codegen.ukernel_descriptor<'
-        '"oneliner_cmsis_nn_conv_s8", bitcode>} '
-    )
     finalized = 0
     lines = []
     for line in text.splitlines():
-        if "iree_codegen.ukernel.generic" in line and descriptor in line:
-            line = line.replace(descriptor, "", 1)
-            line = line.replace(
-                " strided_dims(",
-                " fn_def_attrs {hal.import.bitcode = true} strided_dims(",
-                1,
-            )
-            finalized += 1
+        if "iree_codegen.ukernel.generic" in line:
+            for name in UKERNEL_NAMES:
+                descriptor = (
+                    '{iree_codegen.ukernel = #iree_codegen.ukernel_descriptor<'
+                    f'"{name}", bitcode>}} '
+                )
+                if descriptor not in line:
+                    continue
+                line = line.replace(descriptor, "", 1)
+                line = line.replace(
+                    " strided_dims(",
+                    " fn_def_attrs {hal.import.bitcode = true} strided_dims(",
+                    1,
+                )
+                finalized += 1
+                break
         lines.append(line)
     return "\n".join(lines) + ("\n" if text.endswith("\n") else ""), finalized
 
@@ -354,7 +888,7 @@ def main() -> int:
     operation = finalize_configured if args.finalize_configured else rewrite
     output, count = operation(sys.stdin.read())
     if args.require_match and count == 0:
-        print("no supported CMSIS-NN int8 Conv2D found", file=sys.stderr)
+        print("no supported CMSIS-NN int8 operation found", file=sys.stderr)
         return 1
     sys.stdout.write(output)
     return 0

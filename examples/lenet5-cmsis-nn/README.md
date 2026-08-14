@@ -1,6 +1,6 @@
 # LeNet5 + CMSIS-NN on Ariel OS
 
-This Rust example follows [`examples/ariel-os-iree`](../ariel-os-iree/) and runs the quantized LeNet5 model on a Cortex-M4F target. The `#[model]` macro rewrites the two supported int8 Conv2D operations to CMSIS-NN ukernels when `cmsis_nn = true`, while all other operations remain on IREE's normal LLVMCPU pipelines.
+This Rust example follows [`examples/ariel-os-iree`](../ariel-os-iree/) and runs the quantized LeNet5 model on a Cortex-M4F target. When `cmsis_nn = true`, the `#[model]` macro rewrites seven supported int8 operations to CMSIS-NN ukernels: two Conv2D, two MaxPool, and three fully connected forms. Other operations remain on IREE's normal LLVMCPU pipelines.
 
 ```rust
 #[model(
@@ -64,12 +64,14 @@ The model uses `arena = "shared"` and `ConstStaticCell` input storage so the mod
 
 ## Verify CMSIS-NN Lowering
 
-The macro's generated `*.10.executable-targets.mlir` contains two calls to:
+The macro's generated `*.10.executable-targets.mlir` contains calls to:
 
 ```text
 llvm.call @oneliner_cmsis_nn_conv_s8
+llvm.call @oneliner_cmsis_nn_max_pool_s8
+llvm.call @oneliner_cmsis_nn_fully_connected_s8
 ```
 
-Those calls correspond to LeNet5's two 5x5 int8 convolutions. Pooling, fully connected layers, quantization support operations, and output conversion retain their normal IREE lowering.
+Those seven calls correspond to LeNet5's two 5x5 int8 convolutions, two max-pooling layers, and three fully connected layers. Quantization support operations and output conversion retain their normal IREE lowering.
 
 The generated model object can contain unresolved C/compiler-runtime helpers such as `memcpy`, `roundf`, or ARM soft-float routines. Ariel OS resolves these during the final firmware link.
