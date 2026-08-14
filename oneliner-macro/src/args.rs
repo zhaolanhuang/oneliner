@@ -6,6 +6,7 @@ pub struct ModelArgs {
     pub backend: BackendArg,
     pub arena: ArenaArg,
     pub format: Option<ModelFormat>,
+    pub cmsis_nn: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +50,7 @@ impl ModelArgs {
         let mut backend = None;
         let mut arena = None;
         let mut format = None;
+        let mut cmsis_nn = None;
         for arg in args {
             match arg {
                 NestedMeta::Meta(Meta::NameValue(meta)) if meta.path.is_ident("backend") => {
@@ -69,10 +71,16 @@ impl ModelArgs {
                     }
                     format = Some(parse_format(meta.lit)?);
                 }
+                NestedMeta::Meta(Meta::NameValue(meta)) if meta.path.is_ident("cmsis_nn") => {
+                    if cmsis_nn.is_some() {
+                        return Err(syn::Error::new(meta.span(), "duplicate cmsis_nn option"));
+                    }
+                    cmsis_nn = Some(parse_bool_option(meta.lit, "cmsis_nn")?);
+                }
                 other => {
                     return Err(syn::Error::new(
                         other.span(),
-                        "unknown #[model] option; expected backend, arena, or format",
+                        "unknown #[model] option; expected backend, arena, format, or cmsis_nn",
                     ));
                 }
             }
@@ -83,8 +91,19 @@ impl ModelArgs {
             backend: backend.unwrap_or(BackendArg::Iree),
             arena: arena.unwrap_or(ArenaArg::Owned),
             format,
+            cmsis_nn: cmsis_nn.unwrap_or(false),
         })
     }
+}
+
+fn parse_bool_option(lit: Lit, name: &str) -> syn::Result<bool> {
+    let Lit::Bool(value) = lit else {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!("{name} must be a boolean literal, for example {name} = true"),
+        ));
+    };
+    Ok(value.value)
 }
 
 fn parse_format(lit: Lit) -> syn::Result<ModelFormat> {
@@ -173,7 +192,41 @@ mod tests {
     fn defaults_to_iree() {
         let args: AttributeArgs = vec![syn::parse_quote!("model.tflite")];
 
-        assert!(ModelArgs::parse(args).is_ok());
+        let args = ModelArgs::parse(args).unwrap();
+        assert_eq!(args.backend, BackendArg::Iree);
+        assert!(!args.cmsis_nn);
+    }
+
+    #[test]
+    fn parses_cmsis_nn_option() {
+        let args: AttributeArgs = vec![
+            syn::parse_quote!("model.tflite"),
+            syn::parse_quote!(cmsis_nn = true),
+        ];
+
+        let args = ModelArgs::parse(args).unwrap();
+        assert!(args.cmsis_nn);
+    }
+
+    #[test]
+    fn rejects_non_boolean_cmsis_nn_option() {
+        let args: AttributeArgs = vec![
+            syn::parse_quote!("model.tflite"),
+            syn::parse_quote!(cmsis_nn = "true"),
+        ];
+
+        assert!(ModelArgs::parse(args).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_cmsis_nn_options() {
+        let args: AttributeArgs = vec![
+            syn::parse_quote!("model.tflite"),
+            syn::parse_quote!(cmsis_nn = true),
+            syn::parse_quote!(cmsis_nn = false),
+        ];
+
+        assert!(ModelArgs::parse(args).is_err());
     }
 
     #[test]

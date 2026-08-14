@@ -43,8 +43,9 @@ pub fn expand(
     input_struct: syn::ItemStruct,
     model: Model,
     arena: ArenaArg,
+    cmsis_nn: bool,
 ) -> syn::Result<TokenStream> {
-    let artifacts = artifacts::build(&input_struct.ident, model)?;
+    let artifacts = artifacts::build(&input_struct.ident, model, cmsis_nn)?;
 
     let expanded = codegen::expand(input_struct, artifacts, arena);
     // eprintln!("generated:\n{expanded}");

@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use proc_macro2::Span;
 use syn::Ident;
@@ -12,7 +12,11 @@ use super::{ArtifactPaths, BindingArtifact, IreeArtifacts};
 use crate::frontend::{Model, TensorInfo};
 use crate::utils::{required_path_env, rust_ident};
 
-pub(super) fn build(struct_ident: &Ident, model: Model) -> syn::Result<IreeArtifacts> {
+pub(super) fn build(
+    struct_ident: &Ident,
+    model: Model,
+    cmsis_nn: bool,
+) -> syn::Result<IreeArtifacts> {
     let Model {
         source_path: model_path,
         compile_input_path,
@@ -34,15 +38,25 @@ pub(super) fn build(struct_ident: &Ident, model: Model) -> syn::Result<IreeArtif
     .unwrap_or_else(|| struct_name.clone());
     let artifact_dir = out_root.join(format!("{struct_name}_iree_{model_stem}"));
     let ir_dump_dir = artifact_dir.join("iree-ir-dumps");
+    if ir_dump_dir.exists() {
+        fs::remove_dir_all(&ir_dump_dir)
+            .map_err(|error| syn::Error::new(Span::call_site(), error))?;
+    }
     fs::create_dir_all(&ir_dump_dir).map_err(|error| syn::Error::new(Span::call_site(), error))?;
 
     let vmfb_path = artifact_dir.join(format!("{model_stem}.vmfb"));
     let object_path = artifact_dir.join(format!("{model_stem}.o"));
 
-    run_iree_compile(&compile_input_path, &vmfb_path, &object_path, &ir_dump_dir)?;
+    run_iree_compile(
+        &compile_input_path,
+        &vmfb_path,
+        &object_path,
+        &ir_dump_dir,
+        cmsis_nn,
+    )?;
     let (query_fn, query_link_name) = parse_query_function(&object_path)?;
 
-    let ir_path = ir_dump_dir.join(format!("{ir_dump_stem}.10.executable-targets.mlir"));
+    let ir_path = executable_targets_path(&ir_dump_dir, &ir_dump_stem)?;
     let flow_rs = artifact_dir.join(format!("{model_stem}.flow.rs"));
     let metadata_json = artifact_dir.join(format!("{model_stem}.flow.json"));
     run_converter(&ir_path, &flow_rs, &metadata_json)?;
@@ -74,6 +88,42 @@ pub(super) fn build(struct_ident: &Ident, model: Model) -> syn::Result<IreeArtif
         input_tensor: model_io.input,
         output_tensor: model_io.output,
     })
+}
+
+fn executable_targets_path(ir_dump_dir: &Path, preferred_stem: &str) -> syn::Result<PathBuf> {
+    let preferred = ir_dump_dir.join(format!("{preferred_stem}.10.executable-targets.mlir"));
+    if preferred.is_file() {
+        return Ok(preferred);
+    }
+
+    let mut candidates = fs::read_dir(ir_dump_dir)
+        .map_err(|error| syn::Error::new(Span::call_site(), error))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.ends_with(".10.executable-targets.mlir"))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    match candidates.as_slice() {
+        [path] => Ok(path.clone()),
+        [] => Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "IREE did not emit an executable-targets artifact in {}",
+                ir_dump_dir.display()
+            ),
+        )),
+        _ => Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "IREE emitted multiple executable-targets artifacts in {}",
+                ir_dump_dir.display()
+            ),
+        )),
+    }
 }
 
 fn validate_tensor_size(

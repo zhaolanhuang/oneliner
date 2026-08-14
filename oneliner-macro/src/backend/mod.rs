@@ -13,10 +13,11 @@ use crate::frontend::Model;
 pub fn expand(
     backend: BackendArg,
     arena: ArenaArg,
+    cmsis_nn: bool,
     input_struct: ItemStruct,
     model: Model,
 ) -> syn::Result<proc_macro2::TokenStream> {
     match backend {
-        BackendArg::Iree => iree::expand(input_struct, model, arena),
+        BackendArg::Iree => iree::expand(input_struct, model, arena, cmsis_nn),
     }
 }

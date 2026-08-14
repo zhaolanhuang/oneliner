@@ -1,0 +1,19 @@
+[package]
+name = "oneliner-lenet5-cmsis-nn"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ariel-os = { path = "build/imports/ariel-os/src/ariel-os", features = ["threading", "time"] }
+ariel-os-boards = { path = "build/imports/ariel-os/src/ariel-os-boards" }
+oneliner = { path = "../../oneliner", default-features = false, features = ["iree-runtime",] }
+static_cell = "2.1.1"
+
+[patch.crates-io]
+ariel-os = { path = "build/imports/ariel-os/src/ariel-os" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(context, values(any()))',
+] }

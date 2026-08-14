@@ -1,0 +1,11 @@
+imports:
+  - git:
+      url: https://github.com/ariel-os/ariel-os
+      tag: v0.5.0
+    dldir: ariel-os
+
+apps:
+  - name: oneliner-lenet5-cmsis-nn
+    selects:
+      - ?multi-core
+      - sw/threading
