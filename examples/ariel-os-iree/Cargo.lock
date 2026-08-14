@@ -2109,16 +2109,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oneliner-ariel-os-executor"
-version = "0.1.0"
-dependencies = [
- "ariel-os",
- "heapless 0.9.3",
- "oneliner-executor",
- "portable-atomic",
-]
-
-[[package]]
 name = "oneliner-ariel-os-iree"
 version = "0.1.0"
 dependencies = [
@@ -2157,10 +2147,8 @@ name = "oneliner-runtime"
 version = "0.1.0"
 dependencies = [
  "aligned",
- "ariel-os",
  "critical-section",
  "log",
- "oneliner-ariel-os-executor",
  "oneliner-executor",
  "oneliner-iree-abi",
  "portable-atomic",

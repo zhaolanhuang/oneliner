@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 ariel-os = { path = "build/imports/ariel-os/src/ariel-os", features = ["threading", "time",] }
 ariel-os-boards = { path = "build/imports/ariel-os/src/ariel-os-boards" }
-oneliner = { path = "../../oneliner", default-features = false, features = ["iree-runtime", "ariel-os"] }
+oneliner = { path = "../../oneliner", default-features = false, features = ["iree-runtime",] }
 static_cell = "2.1.1"
 
 # This patch is a MUST to avoid version conflict between ariel-os and oneliner-runtime dependencies. The ariel-os dependency in oneliner-runtime is a workspace dependency, which is not the same as the ariel-os dependency in this crate. This patch will make sure that both dependencies are the same.

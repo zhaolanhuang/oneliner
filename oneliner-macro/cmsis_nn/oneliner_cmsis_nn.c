@@ -42,9 +42,9 @@ void oneliner_cmsis_nn_conv_s8(const int8_t *input_base, size_t input_offset,
                                int8_t *output_base, size_t output_offset) {
   const int8_t *input = CONST_TENSOR(int8_t, input_base, input_offset);
   const int8_t *filter = CONST_TENSOR(int8_t, filter_base, filter_offset);
-  const int32_t *bias = CONST_TENSOR(int32_t, bias_base, bias_offset);
+  const int32_t *bias = bias_base + bias_offset;
   int8_t *scratch = TENSOR(int8_t, scratch_base, scratch_offset);
-  const int32_t *config = CONST_TENSOR(int32_t, config_base, config_offset);
+  const int32_t *config = config_base + config_offset;
   int8_t *output = TENSOR(int8_t, output_base, output_offset);
   cmsis_nn_context context = {
       .buf = scratch,
@@ -59,8 +59,8 @@ void oneliner_cmsis_nn_conv_s8(const int8_t *input_base, size_t input_offset,
       .activation = {.min = config[17], .max = config[18]},
   };
   cmsis_nn_per_channel_quant_params quant = {
-      .multiplier = TENSOR(int32_t, multiplier_base, multiplier_offset),
-      .shift = TENSOR(int32_t, shift_base, shift_offset),
+      .multiplier = (int32_t *)multiplier_base + multiplier_offset,
+      .shift = (int32_t *)shift_base + shift_offset,
   };
   cmsis_nn_dims input_dims = {
       .n = config[0], .h = config[1], .w = config[2], .c = config[3]};

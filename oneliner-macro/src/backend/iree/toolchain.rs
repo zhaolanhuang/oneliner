@@ -127,6 +127,7 @@ fn run_iree_compile_with_cmsis_nn(
             "--iree-llvmcpu-static-library-output-path={}",
             object.display()
         ))
+        .arg("--iree-llvmcpu-stack-allocation-limit=65536")
         .arg("-o")
         .arg(&preprocessing);
     run_command(&mut preprocess, "IREE preprocessing")?;
@@ -220,6 +221,7 @@ fn run_iree_compile_with_cmsis_nn(
             "--dump-compilation-phases-to={}",
             ir_dump_dir.display()
         ))
+        .arg("--iree-llvmcpu-stack-allocation-limit=65536")
         .arg("-o")
         .arg(vmfb);
     run_command(&mut compile, "iree-compile with CMSIS-NN")
