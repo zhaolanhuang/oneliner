@@ -16,6 +16,7 @@ UKERNEL_NAMES = (
     "oneliner_cmsis_nn_max_pool_s8",
     "oneliner_cmsis_nn_fully_connected_s8",
     "oneliner_cmsis_nn_depthwise_conv_s8",
+    "oneliner_cmsis_nn_avg_pool_s8",
 )
 
 
@@ -55,6 +56,19 @@ class DepthwiseMatch:
     input_type: str
     filter_type: str
     accumulator_type: str
+    stride: tuple[int, int]
+    dilation: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class AvgPoolMatch:
+    result: str
+    input_value: str
+    input_type: str
+    window_type: str
+    accumulator_type: str
+    output_init: str
+    output_type: str
     stride: tuple[int, int]
     dilation: tuple[int, int]
 
@@ -170,6 +184,85 @@ def find_pool(line: str) -> PoolMatch | None:
         stride=stride,
         dilation=dilation,
     )
+
+
+def find_avgpool(line: str) -> AvgPoolMatch | None:
+    pattern = re.compile(
+        rf"^\s*({SSA})\s*=\s*linalg\.pooling_nhwc_sum\s*"
+        rf"(?P<attrs>\{{.*?\}})\s*ins\("
+        rf"({SSA}),\s*({SSA})\s*:\s*(tensor<[^>]+>),\s*(tensor<[^>]+>)\)\s*"
+        rf"outs\(({SSA})\s*:\s*(tensor<[^>]+>)\)"
+    )
+    match = pattern.match(line)
+    if not match:
+        return None
+    stride = parse_pair(match.group("attrs"), "strides")
+    dilation = parse_pair(match.group("attrs"), "dilations")
+    if stride is None or dilation is None:
+        return None
+    return AvgPoolMatch(
+        result=match.group(1),
+        input_value=match.group(3),
+        input_type=match.group(5),
+        window_type=match.group(6),
+        accumulator_type=match.group(8),
+        output_init=match.group(7),
+        output_type=match.group(8),
+        stride=stride,
+        dilation=dilation,
+    )
+
+
+def avgpool_requant_match(
+    lines: list[str], pool: AvgPoolMatch, start: int, constants: dict[str, int]
+) -> tuple[int, int, str, str, str, int, int, int] | None:
+    use_pattern = re.compile(
+        rf"^\s*({SSA})\s*=\s*linalg\.generic\s+.*ins\("
+        rf"{re.escape(pool.result)}\s*:\s*{re.escape(pool.accumulator_type)}\)\s*"
+        rf"outs\(({SSA})\s*:\s*(tensor<[^>]+>)\)"
+    )
+    for index in range(start + 1, len(lines)):
+        match = use_pattern.match(lines[index])
+        if not match:
+            continue
+        end = block_end(lines, index)
+        body = "\n".join(lines[index:end])
+        multiplier_match = re.search(
+            rf"arith\.muli\s+{SSA},\s*({SSA})\s*:\s*i64", body
+        )
+        rounding_match = re.search(
+            rf"arith\.addi\s+{SSA},\s*({SSA})\s*:\s*i64", body
+        )
+        shift_match = re.search(
+            rf"arith\.shrui\s+{SSA},\s*({SSA})\s*:\s*i64", body
+        )
+        clamp_match = re.search(
+            rf"({SSA})\s*=\s*arith\.maxsi\s+{SSA},\s*({SSA})\s*:\s*i32\s*\n\s*"
+            rf"({SSA})\s*=\s*arith\.minsi\s+\1,\s*({SSA})\s*:\s*i32",
+            body,
+        )
+        if not (multiplier_match and rounding_match and shift_match and clamp_match):
+            continue
+        multiplier = resolve_scalar(multiplier_match.group(1), constants)
+        rounding = resolve_scalar(rounding_match.group(1), constants)
+        shift = resolve_scalar(shift_match.group(1), constants)
+        activation_min = resolve_scalar(clamp_match.group(2), constants)
+        activation_max = resolve_scalar(clamp_match.group(4), constants)
+        if None in (multiplier, rounding, shift, activation_min, activation_max):
+            continue
+        if multiplier < 0 or multiplier >= (1 << 31) or rounding != (1 << 31) or shift != 32:
+            continue
+        return (
+            index,
+            end,
+            match.group(1),
+            match.group(2),
+            match.group(3),
+            int(multiplier),
+            int(activation_min),
+            int(activation_max),
+        )
+    return None
 
 
 def find_depthwise(
@@ -607,7 +700,17 @@ def rewrite(text: str) -> tuple[str, int]:
         pad_h, pad_w = total_pad_h // 2, total_pad_w // 2
 
         rhs_cols = filter_shape[0] * filter_shape[1] * input_shape[3]
-        is_1x1 = filter_shape[0:2] == (1, 1) and pad_h == 0 and pad_w == 0
+        # The CMSIS-NN wrapper only takes the buffer-free 1x1 fast paths when
+        # dilation is 1; a dilated 1x1 conv otherwise falls into the generic
+        # arm_convolve_s8, which returns ARM_CMSIS_NN_ARG_ERROR without a
+        # scratch buffer. Allocate the generic buffer in that case.
+        is_1x1 = (
+            filter_shape[0:2] == (1, 1)
+            and pad_h == 0
+            and pad_w == 0
+            and dilation_h == 1
+            and dilation_w == 1
+        )
         scratch_size = 0 if is_1x1 else 4 * ((rhs_cols + 3) // 4 * 4)
         scratch_len = max(1, scratch_size)
         cmsis_shifts = [31 - value for value in shift_values]
@@ -847,6 +950,76 @@ def rewrite(text: str) -> tuple[str, int]:
             f"{indent}}} -> {pool.output_type}",
         ]
         replacements.append((pool_index, pool_index + 1, generated))
+        rewritten += 1
+
+    for pool_index, line in enumerate(lines):
+        pool = find_avgpool(line)
+        if pool is None:
+            continue
+        input_shape = parse_shape(pool.input_type)
+        window_shape = parse_shape(pool.window_type)
+        output_shape = parse_shape(pool.output_type)
+        accumulator_shape = parse_shape(pool.accumulator_type)
+        requant = avgpool_requant_match(
+            lines, pool, pool_index, constants
+        )
+        if (
+            input_shape is None
+            or len(input_shape) != 4
+            or window_shape is None
+            or len(window_shape) != 2
+            or output_shape is None
+            or len(output_shape) != 4
+            or accumulator_shape is None
+            or len(accumulator_shape) != 4
+            or input_shape[0] != 1
+            or output_shape[0] != 1
+            or input_shape[3] != output_shape[3]
+            or accumulator_shape != output_shape
+            or pool.dilation != (1, 1)
+            or requant is None
+        ):
+            continue
+        req_start, req_end, result, output_init, output_type, multiplier, \
+            activation_min, activation_max = requant
+        stride_h, stride_w = pool.stride
+        kernel_h, kernel_w = window_shape
+        total_pad_h = max(
+            0, (output_shape[1] - 1) * stride_h + kernel_h - input_shape[1]
+        )
+        total_pad_w = max(
+            0, (output_shape[2] - 1) * stride_w + kernel_w - input_shape[2]
+        )
+        if total_pad_h or total_pad_w:
+            continue
+        prefix = f"cmsis_nn_{rewritten}"
+        config_values = [
+            input_shape[0], input_shape[1], input_shape[2], input_shape[3],
+            output_shape[1], output_shape[2], kernel_h, kernel_w,
+            stride_h, stride_w, 0, 0, activation_min, activation_max,
+            multiplier,
+        ]
+        indent = re.match(r"\s*", lines[pool_index]).group(0)
+        symbols = ", ".join(f"s{index}" for index in range(7))
+        maps = [
+            f"affine_map<()[{symbols}] -> (s0, s4, s5, s3)>",
+            f"affine_map<()[{symbols}] -> (s6)>",
+            f"affine_map<()[{symbols}] -> (s0, s1, s2, s3)>",
+        ]
+        generated = [
+            f"{indent}%{prefix}_config = arith.constant dense<{config_values}> : tensor<15xi32>",
+            f'{indent}{result} = iree_linalg_ext.custom_op {{indexing_maps = [{", ".join(maps)}], '
+            f'iterator_types = []}} attributes {{'
+            f'iree_codegen.ukernel = #iree_codegen.ukernel_descriptor<"oneliner_cmsis_nn_avg_pool_s8", bitcode>, '
+            f'hal.executable.objects = [#hal.executable.object<{{path = "{BITCODE_PATH}"}}>]}} '
+            f'ins({pool.input_value}, %{prefix}_config : {pool.input_type}, tensor<15xi32>) '
+            f'outs({output_init} : {output_type}) {{',
+            f'{indent}^bb0(%input: tensor<?x?x?x?xi8>, %config: tensor<?xi32>, '
+            f'%out: tensor<?x?x?x?xi8>):',
+            f"{indent}  iree_linalg_ext.yield %out : tensor<?x?x?x?xi8>",
+            f"{indent}}} -> {output_type}",
+        ]
+        replacements.append((pool_index, req_end, generated))
         rewritten += 1
 
     for start, end, generated in sorted(
