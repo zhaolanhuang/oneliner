@@ -61,9 +61,11 @@ Add `--features mcunet` to any build to run the MCUNet visual-wake-word model.
 
 ## MVE caveat
 
-The MVE build boots, links the MVE prebuilt bitcode, and runs both models on
-`mps3-an547`, but the numerical results are wrong. The same wrong results
-occur with `cmsis_nn = false` (standard IREE codegen, no ukernels at all), so
-the divergence comes from the base IREE/LLVM MVE (Helium) compilation or
-QEMU 8.2's MVE execution model — not from the CMSIS-NN ukernels. Validate MVE
-numerics on real M55 hardware.
+The MVE build boots and links the MVE prebuilt bitcode on `mps3-an547`, but
+QEMU 8.2.2's MVE (Helium) emulation is broken: even a bare `vldrb.u8` /
+`vstrb.u8` vector register round-trip and a `vadd.i8` return all zeros
+(verified with a minimal inline-asm probe in this example). Because every MVE
+vector operation produces zeros, both the CMSIS-NN ukernels and the standard
+IREE MVE codegen (`cmsis_nn = false`) produce wrong results. This is a QEMU
+bug, not an Oneliner/CMSIS-NN issue. Validate MVE numerics on real M55
+hardware or a QEMU release with working MVE support.
