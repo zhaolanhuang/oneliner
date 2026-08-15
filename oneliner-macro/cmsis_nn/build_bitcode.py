@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,6 +37,54 @@ SOURCES = [
     "Source/NNSupportFunctions/arm_s8_to_s16_unordered_with_offset.c",
 ]
 
+# Precompiled Cortex-M variants shipped with the macro crate. The id doubles
+# as the file name (without the .bc suffix) and as the lookup key in
+# manifest.json.
+VARIANTS = [
+    {
+        "id": "thumbv6m-none-eabi",
+        "triple": "thumbv6m-none-eabi",
+        "cpu": "cortex-m0",
+        "features": "+strict-align,+atomics-32",
+        "float_abi": "soft",
+    },
+    {
+        "id": "thumbv7m-none-eabi",
+        "triple": "thumbv7m-none-eabi",
+        "cpu": "cortex-m3",
+        "features": "",
+        "float_abi": "soft",
+    },
+    {
+        "id": "thumbv7em-none-eabi",
+        "triple": "thumbv7em-none-eabi",
+        "cpu": "cortex-m4",
+        "features": "",
+        "float_abi": "soft",
+    },
+    {
+        "id": "thumbv7em-none-eabihf",
+        "triple": "thumbv7em-none-eabihf",
+        "cpu": "cortex-m4",
+        "features": "+vfp4d16sp",
+        "float_abi": "hard",
+    },
+    {
+        "id": "thumbv8m.main-none-eabi",
+        "triple": "thumbv8m.main-none-eabi",
+        "cpu": "cortex-m33",
+        "features": "",
+        "float_abi": "soft",
+    },
+    {
+        "id": "thumbv8m.main-none-eabihf",
+        "triple": "thumbv8m.main-none-eabihf",
+        "cpu": "cortex-m33",
+        "features": "+fp-armv8d16sp",
+        "float_abi": "hard",
+    },
+]
+
 
 def run(command: list[str]) -> None:
     subprocess.run(command, check=True)
@@ -51,6 +101,11 @@ def tool_version(name: str) -> str:
     except (OSError, subprocess.CalledProcessError):
         version = ""
     return f"{path}:{version}"
+
+
+def llvm_major(name: str) -> int | None:
+    match = re.search(r"clang version (\d+)\.", tool_version(name))
+    return int(match.group(1)) if match else None
 
 
 def compute_cache_key(
@@ -102,14 +157,124 @@ def check_no_undefined_symbols(llvm_nm: str, bitcode: Path) -> bool:
     return True
 
 
+def build_one(
+    cmsis_nn: Path,
+    shim: Path,
+    output: Path,
+    triple: str,
+    cpu: str,
+    features: str,
+    float_abi: str,
+    include_dirs: list[Path],
+    cache_dir: Path | None,
+    no_cache: bool,
+    clang: str,
+    llvm_link: str,
+    llvm_nm: str,
+) -> bool:
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    compile_flags = [
+        clang,
+        f"--target={triple}",
+        f"-mcpu={cpu}",
+        "-mthumb",
+        "-O3",
+        "-flto",
+        "-emit-llvm",
+        "-c",
+        "-ffreestanding",
+        "-ffunction-sections",
+        "-fdata-sections",
+        "-I",
+        str(cmsis_nn / "Include"),
+    ]
+    for include_dir in include_dirs:
+        compile_flags.extend(["-I", str(include_dir)])
+    if float_abi == "hard":
+        compile_flags.append("-mfloat-abi=hard")
+        # A hard-float ABI on Cortex-M33 requires an FPU selection.
+        if cpu == "cortex-m33":
+            compile_flags.append("-mfpu=fpv5-d16")
+
+    cached: Path | None = None
+    if not no_cache and cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tool_versions = {
+            "clang": tool_version("clang"),
+            "llvm-link": tool_version("llvm-link"),
+            "llvm-nm": tool_version("llvm-nm"),
+        }
+        key = compute_cache_key(
+            cmsis_nn, shim, include_dirs, triple, cpu, features, compile_flags,
+            tool_versions,
+        )
+        cached = cache_dir / f"{key}.bc"
+        if cached.exists():
+            shutil.copyfile(cached, output)
+            if not check_no_undefined_symbols(llvm_nm, output):
+                return False
+            return True
+
+    object_dir = output.parent / "cmsis-nn-bc"
+    object_dir.mkdir(parents=True, exist_ok=True)
+
+    inputs = [shim, *(cmsis_nn / source for source in SOURCES)]
+    bitcode_files: list[Path] = []
+    for index, source in enumerate(inputs):
+        bitcode = object_dir / f"{index:02d}-{source.stem}.bc"
+        run([*compile_flags, str(source), "-o", str(bitcode)])
+        bitcode_files.append(bitcode)
+
+    run([llvm_link, *(str(path) for path in bitcode_files), "-o", str(output)])
+    if not check_no_undefined_symbols(llvm_nm, output):
+        return False
+
+    if not no_cache and cache_dir is not None and cached is not None:
+        fd, temporary = tempfile.mkstemp(dir=cache_dir, suffix=".tmp")
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(output.read_bytes())
+        os.replace(temporary, cached)
+
+    return True
+
+
+def write_manifest(prebuilt_dir: Path, llvm_major_value: int | None) -> None:
+    manifest = {
+        "llvm_major": llvm_major_value,
+        "variants": [
+            {
+                "id": variant["id"],
+                "triple": variant["triple"],
+                "cpu": variant["cpu"],
+                "features": variant["features"],
+                "float_abi": variant["float_abi"],
+                "file": f"{variant['id']}.bc",
+            }
+            for variant in VARIANTS
+        ],
+    }
+    (prebuilt_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cmsis-nn", type=Path, required=True)
     parser.add_argument("--shim", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--target", required=True)
-    parser.add_argument("--cpu", required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--target")
+    parser.add_argument("--cpu")
     parser.add_argument("--features", default="")
+    parser.add_argument(
+        "--build-all",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="build all precompiled Cortex-M variants into DIR and write "
+        "manifest.json (ignores --output/--target/--cpu/--features)",
+    )
     parser.add_argument(
         "--cache",
         type=Path,
@@ -136,8 +301,6 @@ def main() -> int:
 
     cmsis_nn = args.cmsis_nn.resolve()
     shim = args.shim.resolve()
-    output = args.output.resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
 
     # Freestanding include directory shipping a minimal <string.h>; the rest
     # of the standard headers (stdint, stddef, stdbool, limits) come from
@@ -145,71 +308,41 @@ def main() -> int:
     include_dirs = [Path(__file__).resolve().parent / "include"]
     include_dirs += [Path(path).resolve() for path in args.include]
 
-    compile_flags = [
-        clang,
-        f"--target={args.target}",
-        f"-mcpu={args.cpu}",
-        "-mthumb",
-        "-O3",
-        "-flto",
-        "-emit-llvm",
-        "-c",
-        "-ffreestanding",
-        "-ffunction-sections",
-        "-fdata-sections",
-        "-I",
-        str(cmsis_nn / "Include"),
-    ]
-    for include_dir in include_dirs:
-        compile_flags.extend(["-I", str(include_dir)])
-    if "+vfp" in args.features or args.target.endswith("eabihf"):
-        compile_flags.append("-mfloat-abi=hard")
+    if args.build_all is not None:
+        prebuilt_dir = args.build_all.resolve()
+        prebuilt_dir.mkdir(parents=True, exist_ok=True)
+        for variant in VARIANTS:
+            output = prebuilt_dir / f"{variant['id']}.bc"
+            print(f"building {variant['id']} ...", file=sys.stderr)
+            if not build_one(
+                cmsis_nn, shim, output, variant["triple"], variant["cpu"],
+                variant["features"], variant["float_abi"], include_dirs,
+                None, args.no_cache, clang, llvm_link, llvm_nm,
+            ):
+                return 1
+        write_manifest(prebuilt_dir, llvm_major("clang"))
+        return 0
 
+    if args.output is None or args.target is None or args.cpu is None:
+        parser.error(
+            "--output, --target, and --cpu are required unless --build-all is used"
+        )
+
+    output = args.output.resolve()
     cache_dir: Path | None = None
     if not args.no_cache:
         cache_dir = args.cache
         if cache_dir is None:
             cache_dir = cmsis_nn.parent.parent / "target" / "cmsis-nn-bc"
         cache_dir = cache_dir.resolve()
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        tool_versions = {
-            "clang": tool_version("clang"),
-            "llvm-link": tool_version("llvm-link"),
-            "llvm-nm": tool_version("llvm-nm"),
-        }
-        key = compute_cache_key(
-            cmsis_nn, shim, include_dirs, args.target, args.cpu, args.features,
-            compile_flags, tool_versions,
-        )
-        cached = cache_dir / f"{key}.bc"
-        if cached.exists():
-            shutil.copyfile(cached, output)
-            if not check_no_undefined_symbols(llvm_nm, output):
-                return 1
-            return 0
-    else:
-        cached = None
 
-    object_dir = output.parent / "cmsis-nn-bc"
-    object_dir.mkdir(parents=True, exist_ok=True)
-
-    inputs = [shim, *(cmsis_nn / source for source in SOURCES)]
-    bitcode_files: list[Path] = []
-    for index, source in enumerate(inputs):
-        bitcode = object_dir / f"{index:02d}-{source.stem}.bc"
-        run([*compile_flags, str(source), "-o", str(bitcode)])
-        bitcode_files.append(bitcode)
-
-    run([llvm_link, *(str(path) for path in bitcode_files), "-o", str(output)])
-    if not check_no_undefined_symbols(llvm_nm, output):
+    float_abi = "hard" if (args.target.endswith("eabihf") or "+vfp" in args.features) else "soft"
+    if not build_one(
+        cmsis_nn, shim, output, args.target, args.cpu, args.features,
+        float_abi, include_dirs, cache_dir, args.no_cache, clang, llvm_link,
+        llvm_nm,
+    ):
         return 1
-
-    if cache_dir is not None and cached is not None:
-        fd, temporary = tempfile.mkstemp(dir=cache_dir, suffix=".tmp")
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(output.read_bytes())
-        os.replace(temporary, cached)
-
     return 0
 
 

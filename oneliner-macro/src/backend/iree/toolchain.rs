@@ -36,17 +36,17 @@ pub(super) fn run_iree_compile(
     let target_cpu = target_info
         .cpu
         .filter(|value| !value.is_empty())
-        .or_else(|| is_cortex_m4_target(&llvm_triple).then(|| "cortex-m4".to_owned()));
+        .or_else(|| cortex_m_cpu(&llvm_triple).map(str::to_owned));
     let cpu_features = target_info.features.filter(|value| !value.is_empty());
 
-    if cmsis_nn && is_cortex_m4_target(&llvm_triple) {
+    if cmsis_nn && cortex_m_cpu(&llvm_triple).is_some() {
         return run_iree_compile_with_cmsis_nn(
             compile_input,
             vmfb,
             object,
             ir_dump_dir,
             &llvm_triple,
-            target_cpu.as_deref().expect("Cortex-M4 CPU was inferred"),
+            target_cpu.as_deref().expect("Cortex-M CPU was inferred"),
             cpu_features.as_deref(),
         );
     }
@@ -62,8 +62,38 @@ pub(super) fn run_iree_compile(
     )
 }
 
-fn is_cortex_m4_target(llvm_triple: &str) -> bool {
-    matches!(llvm_triple, "thumbv7em-none-eabi" | "thumbv7em-none-eabihf")
+/// Maps an LLVM triple to the Cortex-M CPU that the precompiled CMSIS-NN
+/// bitcode was built for. Returns `None` for targets without a prebuilt
+/// bitcode (CMSIS-NN lowering stays disabled for those).
+fn cortex_m_cpu(llvm_triple: &str) -> Option<&'static str> {
+    match llvm_triple {
+        "thumbv6m-none-eabi" => Some("cortex-m0"),
+        "thumbv7m-none-eabi" => Some("cortex-m3"),
+        "thumbv7em-none-eabi" | "thumbv7em-none-eabihf" => Some("cortex-m4"),
+        "thumbv8m.main-none-eabi" | "thumbv8m.main-none-eabihf" => Some("cortex-m33"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cortex_m_cpu;
+
+    #[test]
+    fn maps_cortex_m_triples_to_cpus() {
+        assert_eq!(cortex_m_cpu("thumbv6m-none-eabi"), Some("cortex-m0"));
+        assert_eq!(cortex_m_cpu("thumbv7m-none-eabi"), Some("cortex-m3"));
+        assert_eq!(cortex_m_cpu("thumbv7em-none-eabi"), Some("cortex-m4"));
+        assert_eq!(cortex_m_cpu("thumbv7em-none-eabihf"), Some("cortex-m4"));
+        assert_eq!(cortex_m_cpu("thumbv8m.main-none-eabi"), Some("cortex-m33"));
+        assert_eq!(cortex_m_cpu("thumbv8m.main-none-eabihf"), Some("cortex-m33"));
+    }
+
+    #[test]
+    fn leaves_non_cortex_m_targets_unchanged() {
+        assert_eq!(cortex_m_cpu("aarch64-unknown-none"), None);
+        assert_eq!(cortex_m_cpu("x86_64-unknown-linux-gnu"), None);
+    }
 }
 
 fn configure_iree_target(
@@ -194,7 +224,14 @@ fn run_iree_compile_with_cmsis_nn(
         .arg(target_cpu)
         .arg("--features")
         .arg(cpu_features.unwrap_or_default());
-    run_command(&mut build_bitcode, "CMSIS-NN bitcode builder")?;
+    if !resolve_prebuilt_bitcode(
+        &macro_dir,
+        llvm_triple,
+        target_cpu,
+        &bitcode,
+    )? {
+        run_command(&mut build_bitcode, "CMSIS-NN bitcode builder")?;
+    }
 
     let mut compile = Command::new("iree-compile");
     configure_iree_target(
@@ -225,6 +262,110 @@ fn run_iree_compile_with_cmsis_nn(
         .arg("-o")
         .arg(vmfb);
     run_command(&mut compile, "iree-compile with CMSIS-NN")
+}
+
+/// Queries the LLVM major version used by the installed `iree-compile`.
+fn iree_compiler_llvm_major() -> syn::Result<Option<u64>> {
+    let output = Command::new("iree-compile")
+        .arg("--version")
+        .output()
+        .map_err(|error| syn::Error::new(Span::call_site(), format!("failed to run iree-compile --version: {error}")))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text
+        .lines()
+        .find_map(|line| line.strip_prefix("  LLVM version "))
+        .and_then(|version| version.split('.').next())
+        .and_then(|major| major.parse().ok()))
+}
+
+/// Selects a precompiled CMSIS-NN bitcode variant for the target and copies
+/// it over `bitcode`. Returns `Ok(true)` when a prebuilt bitcode was used, or
+/// `Ok(false)` when the caller must build the bitcode on the fly.
+///
+/// Precompiled bitcode is tied to the LLVM major version it was built with:
+/// a mismatch with the installed `iree-compile` is a hard error (set
+/// `ONELINER_CMSIS_NN_FORCE_BUILD=1` to always compile on the fly).
+fn resolve_prebuilt_bitcode(
+    macro_dir: &Path,
+    llvm_triple: &str,
+    target_cpu: &str,
+    bitcode: &Path,
+) -> syn::Result<bool> {
+    if std::env::var_os("ONELINER_CMSIS_NN_FORCE_BUILD").is_some() {
+        return Ok(false);
+    }
+    let prebuilt_dir = macro_dir.join("cmsis_nn").join("prebuilt");
+    let manifest_text = std::fs::read_to_string(prebuilt_dir.join("manifest.json"))
+        .map_err(|error| {
+            syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "CMSIS-NN prebuilt manifest is missing or unreadable ({}: {error}); \
+                     regenerate it with \
+                     `python {}/cmsis_nn/build_bitcode.py --build-all ...` or set \
+                     ONELINER_CMSIS_NN_FORCE_BUILD=1 to compile on the fly",
+                    prebuilt_dir.display(),
+                    macro_dir.display()
+                ),
+            )
+        })?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text)
+        .map_err(|error| syn::Error::new(Span::call_site(), format!("invalid CMSIS-NN prebuilt manifest: {error}")))?;
+
+    let prebuilt_llvm_major = manifest.get("llvm_major").and_then(|value| value.as_u64());
+    let installed_llvm_major = iree_compiler_llvm_major()?;
+    // LLVM bitcode is forward-compatible: an IREE using a newer LLVM can read
+    // bitcode built with an older clang, but not the other way around. Refuse
+    // to use the prebuilt bitcode when the installed IREE is older than the
+    // LLVM the prebuilt was generated with.
+    if prebuilt_llvm_major.is_some() && installed_llvm_major.is_some()
+        && installed_llvm_major < prebuilt_llvm_major
+    {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "CMSIS-NN prebuilt bitcode was built with LLVM {} but the installed \
+                 iree-compile uses LLVM {}, which cannot read it. Align the toolchain \
+                 version and regenerate the prebuilt bitcode \
+                 (`build_bitcode.py --build-all`), or set \
+                 ONELINER_CMSIS_NN_FORCE_BUILD=1 to compile on the fly",
+                prebuilt_llvm_major.unwrap_or_default(),
+                installed_llvm_major.unwrap_or_default(),
+            ),
+        ));
+    }
+
+    let float_abi = if llvm_triple.ends_with("eabihf") { "hard" } else { "soft" };
+    let variants = manifest
+        .get("variants")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| syn::Error::new(Span::call_site(), "CMSIS-NN prebuilt manifest has no variants"))?;
+    let matching = variants.iter().find(|variant| {
+        variant.get("triple").and_then(|value| value.as_str()) == Some(llvm_triple)
+            && variant.get("cpu").and_then(|value| value.as_str()) == Some(target_cpu)
+            && variant.get("float_abi").and_then(|value| value.as_str()) == Some(float_abi)
+    });
+    let Some(variant) = matching else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "no precompiled CMSIS-NN bitcode for triple {llvm_triple}, cpu {target_cpu}, \
+                 {float_abi} float ABI; regenerate it with `build_bitcode.py --build-all` or \
+                 set ONELINER_CMSIS_NN_FORCE_BUILD=1 to compile on the fly"
+            ),
+        ));
+    };
+    let file = variant
+        .get("file")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| syn::Error::new(Span::call_site(), "CMSIS-NN prebuilt variant has no file"))?;
+    std::fs::copy(prebuilt_dir.join(file), bitcode).map_err(|error| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("failed to copy CMSIS-NN prebuilt bitcode {}: {error}", prebuilt_dir.join(file).display()),
+        )
+    })?;
+    Ok(true)
 }
 
 fn run_standard_iree_compile(

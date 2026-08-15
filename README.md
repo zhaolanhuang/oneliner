@@ -216,14 +216,25 @@ Use it when reducing duplicate RAM use matters more than concurrent inference. T
 
 ## CMSIS-NN
 
-CMSIS-NN lowering is disabled by default. Enable it per model on a supported Cortex-M4 target:
+CMSIS-NN lowering is disabled by default. Enable it per model on a supported Cortex-M target (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[ hf]`, `thumbv8m.main-none-eabi[ hf]`):
 
 ```rust
 #[model("models/model.tflite", cmsis_nn = true)]
 struct MyModel;
 ```
 
-Supported static int8 Conv2D, depthwise Conv2D, MaxPool, and fully connected forms use CMSIS-NN ukernels; other operations retain their normal IREE LLVMCPU lowering. Depthwise Conv2D currently requires batch size 1, channel multiplier 1, unit dilation, and symmetric weights. Set `cmsis_nn = false` or omit the option to build the standard IREE implementation for differential testing. See the [LeNet5 CMSIS-NN example](examples/lenet5-cmsis-nn/) for the complete Cortex-M4F setup.
+Supported static int8 Conv2D, depthwise Conv2D, MaxPool, average pool, and fully connected forms use CMSIS-NN ukernels; other operations retain their normal IREE LLVMCPU lowering. Depthwise Conv2D currently requires batch size 1, channel multiplier 1, unit dilation, and symmetric weights. Set `cmsis_nn = false` or omit the option to build the standard IREE implementation for differential testing. See the [LeNet5 CMSIS-NN example](examples/lenet5-cmsis-nn/) for the complete Cortex-M4F setup.
+
+CMSIS-NN ukernel bitcode is precompiled for each supported Cortex-M core and shipped in `oneliner-macro/cmsis_nn/prebuilt/`, so building a model needs only `iree-compile` (no clang/LLVM tools). The macro selects the variant matching the Rust target; it errors if the installed `iree-compile` uses an older LLVM than the prebuilt bitcode (LLVM bitcode is only backward-readable). Regenerate the variants after bumping IREE/CMSIS-NN with:
+
+```sh
+python oneliner-macro/cmsis_nn/build_bitcode.py \
+  --cmsis-nn third_party/cmsis-nn \
+  --shim oneliner-macro/cmsis_nn/oneliner_cmsis_nn.c \
+  --build-all oneliner-macro/cmsis_nn/prebuilt
+```
+
+Set `ONELINER_CMSIS_NN_FORCE_BUILD=1` to always compile the bitcode on the fly (requires `clang`, `llvm-link`, and `llvm-nm` in `PATH`).
 
 
 ## Project Status

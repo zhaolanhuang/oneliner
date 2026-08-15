@@ -602,47 +602,43 @@ def rewrite(text: str) -> tuple[str, int]:
                 and bias_bytes is not None
             ):
                 prefix = f"cmsis_nn_{rewritten}"
-                bias_byte_offset = (len(source_filter_bytes) + 3) & ~3
-                packed_params = (
-                    source_filter_bytes
-                    + bytes(bias_byte_offset - len(source_filter_bytes))
-                    + bias_bytes
-                )
-                packed_hex = packed_params.hex().upper()
                 config_values = [
                     input_shape[0], input_shape[3], output_shape[3],
                     -conv.input_zero_point, 0, output_offset, multiplier,
-                    31 - shift, activation_min, activation_max, bias_byte_offset,
+                    31 - shift, activation_min, activation_max,
                 ]
                 indent = re.match(r"\s*", lines[req_start]).group(0)
                 generated = [
-                    f'{indent}%{prefix}_params = arith.constant dense<"0x{packed_hex}"> : tensor<{len(packed_params)}xi8>',
-                    f"{indent}%{prefix}_config = arith.constant dense<{config_values}> : tensor<11xi32>",
+                    f"{indent}%{prefix}_config = arith.constant dense<{config_values}> : tensor<10xi32>",
                     f"{indent}%{prefix}_scratch = tensor.empty() : tensor<1xi8>",
                 ]
                 tensor_values = [
                     conv.input_value,
-                    f"%{prefix}_params",
+                    source_filter_value,
+                    bias_value,
                     f"%{prefix}_scratch",
                     f"%{prefix}_config",
                 ]
                 tensor_types = [
                     conv.input_type,
-                    f"tensor<{len(packed_params)}xi8>",
+                    source_filter_type,
+                    bias_type,
                     "tensor<1xi8>",
-                    "tensor<11xi32>",
+                    "tensor<10xi32>",
                 ]
-                symbols = ", ".join(f"s{index}" for index in range(10))
+                symbols = ", ".join(f"s{index}" for index in range(14))
                 maps = [
                     f"affine_map<()[{symbols}] -> (s0, s4, s5, s6)>",
-                    f"affine_map<()[{symbols}] -> (s7)>",
-                    f"affine_map<()[{symbols}] -> (s8)>",
-                    f"affine_map<()[{symbols}] -> (s9)>",
+                    f"affine_map<()[{symbols}] -> (s7, s8, s9, s10)>",
+                    f"affine_map<()[{symbols}] -> (s11)>",
+                    f"affine_map<()[{symbols}] -> (s12)>",
+                    f"affine_map<()[{symbols}] -> (s13)>",
                     f"affine_map<()[{symbols}] -> (s0, s1, s2, s3)>",
                 ]
                 region_types = [
                     "tensor<?x?x?x?xi8>",
-                    "tensor<?xi8>",
+                    "tensor<?x?x?x?xi8>",
+                    "tensor<?xi32>",
                     "tensor<?xi8>",
                     "tensor<?xi32>",
                     "tensor<?x?x?x?xi8>",
@@ -654,10 +650,10 @@ def rewrite(text: str) -> tuple[str, int]:
                     f'hal.executable.objects = [#hal.executable.object<{{path = "{BITCODE_PATH}"}}>]}} '
                     f'ins({", ".join(tensor_values)} : {", ".join(tensor_types)}) '
                     f'outs({output_init} : {output_type}) {{',
-                    f'{indent}^bb0(%input: {region_types[0]}, %params: {region_types[1]}, '
-                    f'%scratch: {region_types[2]}, %config: {region_types[3]}, '
-                    f'%out: {region_types[4]}):',
-                    f"{indent}  iree_linalg_ext.yield %out : {region_types[4]}",
+                    f'{indent}^bb0(%input: {region_types[0]}, %filter: {region_types[1]}, '
+                    f'%bias: {region_types[2]}, %scratch: {region_types[3]}, '
+                    f'%config: {region_types[4]}, %out: {region_types[5]}):',
+                    f"{indent}  iree_linalg_ext.yield %out : {region_types[5]}",
                     f"{indent}}} -> {output_type}",
                 ])
                 replacements.append((req_start, req_end, generated))
@@ -823,19 +819,6 @@ def rewrite(text: str) -> tuple[str, int]:
         if filter_bytes is None or bias_bytes is None or multiplier_bytes is None:
             continue
         cmsis_shifts = [31 - value for value in shift_values]
-        shift_bytes = b"".join(
-            (value & 0xFFFFFFFF).to_bytes(4, "little") for value in cmsis_shifts
-        )
-        bias_byte_offset = (len(filter_bytes) + 3) & ~3
-        multiplier_byte_offset = bias_byte_offset + len(bias_bytes)
-        shift_byte_offset = multiplier_byte_offset + len(multiplier_bytes)
-        packed_params = (
-            filter_bytes
-            + bytes(bias_byte_offset - len(filter_bytes))
-            + bias_bytes
-            + multiplier_bytes
-            + shift_bytes
-        )
         stride_h, stride_w = depthwise.stride
         filter_h, filter_w = filter_shape[:2]
         total_pad_h = max(
@@ -857,33 +840,34 @@ def rewrite(text: str) -> tuple[str, int]:
             output_shape[1], output_shape[2], output_shape[3], filter_h,
             filter_w, stride_h, stride_w, 1, 1, pad_h, pad_w,
             -depthwise.input_zero_point, output_offset, activation_min,
-            activation_max, 1, bias_byte_offset, multiplier_byte_offset,
-            shift_byte_offset, scratch_size,
+            activation_max, 1, scratch_size,
         ]
         prefix = f"cmsis_nn_{rewritten}"
         indent = re.match(r"\s*", lines[req_start]).group(0)
-        packed_hex = packed_params.hex().upper()
-        symbols = ", ".join(f"s{index}" for index in range(9))
+        symbols = ", ".join(f"s{index}" for index in range(14))
         maps = [
-            f"affine_map<()[{symbols}] -> (s0, s4, s5, s3)>",
-            f"affine_map<()[{symbols}] -> (s6)>",
-            f"affine_map<()[{symbols}] -> (s7)>",
-            f"affine_map<()[{symbols}] -> (s8)>",
+            f"affine_map<()[{symbols}] -> (s4, s5, s6, s7)>",
+            f"affine_map<()[{symbols}] -> (s8, s9, s10, s11)>",
+            *[f"affine_map<()[{symbols}] -> (s3)>" for _ in range(3)],
+            f"affine_map<()[{symbols}] -> (s12)>",
+            f"affine_map<()[{symbols}] -> (s13)>",
             f"affine_map<()[{symbols}] -> (s0, s1, s2, s3)>",
         ]
         generated = [
-            f'{indent}%{prefix}_params = arith.constant dense<"0x{packed_hex}"> : tensor<{len(packed_params)}xi8>',
-            f"{indent}%{prefix}_config = arith.constant dense<{config_values}> : tensor<24xi32>",
+            f"{indent}%{prefix}_shift = arith.constant dense<{cmsis_shifts}> : tensor<{len(cmsis_shifts)}xi32>",
+            f"{indent}%{prefix}_config = arith.constant dense<{config_values}> : tensor<21xi32>",
             f"{indent}%{prefix}_scratch = tensor.empty() : tensor<{scratch_len}xi8>",
             f'{indent}{result} = iree_linalg_ext.custom_op {{indexing_maps = [{", ".join(maps)}], '
             f'iterator_types = []}} attributes {{'
             f'iree_codegen.ukernel = #iree_codegen.ukernel_descriptor<"oneliner_cmsis_nn_depthwise_conv_s8", bitcode>, '
             f'hal.executable.objects = [#hal.executable.object<{{path = "{BITCODE_PATH}"}}>]}} '
-            f'ins({depthwise.input_value}, %{prefix}_params, %{prefix}_scratch, %{prefix}_config : '
-            f'{depthwise.input_type}, tensor<{len(packed_params)}xi8>, '
-            f'tensor<{scratch_len}xi8>, tensor<24xi32>) '
+            f'ins({depthwise.input_value}, {depthwise.filter_value}, {bias_value}, {multiplier}, '
+            f'%{prefix}_shift, %{prefix}_scratch, %{prefix}_config : '
+            f'{depthwise.input_type}, {depthwise.filter_type}, {bias_type}, {multiplier_type}, '
+            f'tensor<{len(cmsis_shifts)}xi32>, tensor<{scratch_len}xi8>, tensor<21xi32>) '
             f'outs({output_init} : {output_type}) {{',
-            f'{indent}^bb0(%input: tensor<?x?x?x?xi8>, %params: tensor<?xi8>, '
+            f'{indent}^bb0(%input: tensor<?x?x?x?xi8>, %filter: tensor<?x?x?x?xi8>, '
+            f'%bias: tensor<?xi32>, %multiplier: tensor<?xi32>, %shift: tensor<?xi32>, '
             f'%scratch: tensor<?xi8>, %config: tensor<?xi32>, '
             f'%out: tensor<?x?x?x?xi8>):',
             f"{indent}  iree_linalg_ext.yield %out : tensor<?x?x?x?xi8>",

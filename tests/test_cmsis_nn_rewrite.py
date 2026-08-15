@@ -287,8 +287,8 @@ module {
             '"oneliner_cmsis_nn_fully_connected_s8", bitcode>',
             output,
         )
-        self.assertIn("tensor<16xi8>", output)
-        self.assertIn("tensor<11xi32>", output)
+        self.assertIn("tensor<10xi32>", output)
+        self.assertIn("ins(%input, %weights, %bias,", output)
         self.assertNotIn("arith.muli", output)
 
     def test_rewrites_depthwise_with_hex_encoded_shifts(self):
@@ -300,11 +300,14 @@ module {
             '"oneliner_cmsis_nn_depthwise_conv_s8", bitcode>',
             output,
         )
-        self.assertIn("tensor<24xi32>", output)
-        self.assertIn("tensor<44xi8>", output)
+        self.assertIn("tensor<21xi32>", output)
+        self.assertIn(
+            "ins(%input, %filter, %bias, %mult, %cmsis_nn_0_shift,",
+            output,
+        )
         self.assertIn(
             "dense<[1, 5, 5, 2, 3, 3, 2, 3, 3, 1, 1, 1, 1, 0, 0, "
-            "128, -128, -128, 127, 1, 20, 28, 36, 0]>",
+            "128, -128, -128, 127, 1, 0]>",
             output,
         )
         self.assertNotIn("tosa.apply_scale", output)

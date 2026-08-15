@@ -1,0 +1,53 @@
+{
+  "llvm_major": 22,
+  "variants": [
+    {
+      "id": "thumbv6m-none-eabi",
+      "triple": "thumbv6m-none-eabi",
+      "cpu": "cortex-m0",
+      "features": "+strict-align,+atomics-32",
+      "float_abi": "soft",
+      "file": "thumbv6m-none-eabi.bc"
+    },
+    {
+      "id": "thumbv7m-none-eabi",
+      "triple": "thumbv7m-none-eabi",
+      "cpu": "cortex-m3",
+      "features": "",
+      "float_abi": "soft",
+      "file": "thumbv7m-none-eabi.bc"
+    },
+    {
+      "id": "thumbv7em-none-eabi",
+      "triple": "thumbv7em-none-eabi",
+      "cpu": "cortex-m4",
+      "features": "",
+      "float_abi": "soft",
+      "file": "thumbv7em-none-eabi.bc"
+    },
+    {
+      "id": "thumbv7em-none-eabihf",
+      "triple": "thumbv7em-none-eabihf",
+      "cpu": "cortex-m4",
+      "features": "+vfp4d16sp",
+      "float_abi": "hard",
+      "file": "thumbv7em-none-eabihf.bc"
+    },
+    {
+      "id": "thumbv8m.main-none-eabi",
+      "triple": "thumbv8m.main-none-eabi",
+      "cpu": "cortex-m33",
+      "features": "",
+      "float_abi": "soft",
+      "file": "thumbv8m.main-none-eabi.bc"
+    },
+    {
+      "id": "thumbv8m.main-none-eabihf",
+      "triple": "thumbv8m.main-none-eabihf",
+      "cpu": "cortex-m33",
+      "features": "+fp-armv8d16sp",
+      "float_abi": "hard",
+      "file": "thumbv8m.main-none-eabihf.bc"
+    }
+  ]
+}

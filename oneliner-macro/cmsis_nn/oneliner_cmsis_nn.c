@@ -194,18 +194,17 @@ void oneliner_cmsis_nn_avg_pool_s8(const int8_t *input_base,
 }
 
 // Config: N, ACCUM_DEPTH, OUTPUT_DEPTH, INPUT_OFFSET, FILTER_OFFSET,
-// OUTPUT_OFFSET, MULTIPLIER, SHIFT, ACT_MIN, ACT_MAX, BIAS_BYTE_OFFSET.
+// OUTPUT_OFFSET, MULTIPLIER, SHIFT, ACT_MIN, ACT_MAX.
 void oneliner_cmsis_nn_fully_connected_s8(
-    const int8_t *input_base, size_t input_offset, const int8_t *params_base,
-    size_t params_offset, int8_t *scratch_base, size_t scratch_offset,
-    const int32_t *config_base, size_t config_offset, int8_t *output_base,
-    size_t output_offset) {
+    const int8_t *input_base, size_t input_offset, const int8_t *filter_base,
+    size_t filter_offset, const int32_t *bias_base, size_t bias_offset,
+    int8_t *scratch_base, size_t scratch_offset, const int32_t *config_base,
+    size_t config_offset, int8_t *output_base, size_t output_offset) {
   const int8_t *input = CONST_TENSOR(int8_t, input_base, input_offset);
-  const int8_t *params_data = CONST_TENSOR(int8_t, params_base, params_offset);
+  const int8_t *filter = CONST_TENSOR(int8_t, filter_base, filter_offset);
+  const int32_t *bias = bias_base + bias_offset;
   int8_t *scratch = TENSOR(int8_t, scratch_base, scratch_offset);
   const int32_t *config = CONST_TENSOR(int32_t, config_base, config_offset);
-  const int8_t *filter = params_data;
-  const int32_t *bias = CONST_TENSOR(int32_t, params_data, config[10]);
   int8_t *output = TENSOR(int8_t, output_base, output_offset);
   cmsis_nn_context context = {.buf = scratch, .size = 0};
   cmsis_nn_fc_params params = {
@@ -233,22 +232,23 @@ void oneliner_cmsis_nn_fully_connected_s8(
 
 // Config: N, IH, IW, IC, OH, OW, OC, KH, KW, SH, SW, DH, DW, PH, PW,
 // INPUT_OFFSET, OUTPUT_OFFSET, ACT_MIN, ACT_MAX, CHANNEL_MULTIPLIER,
-// BIAS_BYTE_OFFSET, MULTIPLIER_BYTE_OFFSET, SHIFT_BYTE_OFFSET, SCRATCH_SIZE.
+// SCRATCH_SIZE.
 void oneliner_cmsis_nn_depthwise_conv_s8(
-    const int8_t *input_base, size_t input_offset, const int8_t *params_base,
-    size_t params_offset, int8_t *scratch_base, size_t scratch_offset,
-    const int32_t *config_base, size_t config_offset, int8_t *output_base,
-    size_t output_offset) {
+    const int8_t *input_base, size_t input_offset, const int8_t *filter_base,
+    size_t filter_offset, const int32_t *bias_base, size_t bias_offset,
+    const int32_t *multiplier_base, size_t multiplier_offset,
+    const int32_t *shift_base, size_t shift_offset, int8_t *scratch_base,
+    size_t scratch_offset, const int32_t *config_base, size_t config_offset,
+    int8_t *output_base, size_t output_offset) {
   const int8_t *input = CONST_TENSOR(int8_t, input_base, input_offset);
-  const int8_t *params_data = CONST_TENSOR(int8_t, params_base, params_offset);
+  const int8_t *filter = CONST_TENSOR(int8_t, filter_base, filter_offset);
+  const int32_t *bias = bias_base + bias_offset;
+  int32_t *multiplier = (int32_t *)multiplier_base + multiplier_offset;
+  int32_t *shift = (int32_t *)shift_base + shift_offset;
   int8_t *scratch = TENSOR(int8_t, scratch_base, scratch_offset);
   const int32_t *config = CONST_TENSOR(int32_t, config_base, config_offset);
-  const int8_t *filter = params_data;
-  const int32_t *bias = CONST_TENSOR(int32_t, params_data, config[20]);
-  int32_t *multiplier = TENSOR(int32_t, params_data, config[21]);
-  int32_t *shift = TENSOR(int32_t, params_data, config[22]);
   int8_t *output = TENSOR(int8_t, output_base, output_offset);
-  cmsis_nn_context context = {.buf = scratch, .size = config[23]};
+  cmsis_nn_context context = {.buf = scratch, .size = config[20]};
   cmsis_nn_dw_conv_params params = {
       .input_offset = config[15],
       .output_offset = config[16],
