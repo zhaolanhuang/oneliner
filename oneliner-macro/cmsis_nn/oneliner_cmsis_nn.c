@@ -29,6 +29,18 @@ void oneliner_aeabi_memset(void *dest, size_t size, int value) {
   }
 }
 
+// The bitcode is compiled with -ffreestanding, so CMSIS-NN's calls to memset
+// and memcpy resolve to these plain symbols instead of the __aeabi_* entry
+// points. Both sets are provided so the ukernel never depends on a C library.
+void *memset(void *dest, int value, size_t size) {
+  oneliner_aeabi_memset(dest, size, value);
+  return dest;
+}
+void *memcpy(void *dest, const void *src, size_t size) {
+  oneliner_aeabi_memcpy(dest, src, size);
+  return dest;
+}
+
 // CMSIS-NN failures must not go unnoticed: zero-fill the output tensor so the
 // result is deterministic (and fails any validation) instead of leaving
 // garbage in the output buffer.

@@ -56,6 +56,7 @@ def tool_version(name: str) -> str:
 def compute_cache_key(
     cmsis_nn: Path,
     shim: Path,
+    include_dirs: list[Path],
     target: str,
     cpu: str,
     features: str,
@@ -74,6 +75,12 @@ def compute_cache_key(
         digest.update(version.encode())
         digest.update(b"\0")
     digest.update(shim.read_bytes())
+    for include_dir in include_dirs:
+        for header in sorted(include_dir.rglob("*")):
+            if header.is_file():
+                digest.update(header.relative_to(include_dir).as_posix().encode())
+                digest.update(b"\0")
+                digest.update(header.read_bytes())
     for source in SOURCES:
         digest.update((cmsis_nn / source).read_bytes())
     for header in sorted((cmsis_nn / "Include").rglob("*")):
@@ -112,6 +119,13 @@ def main() -> int:
     parser.add_argument(
         "--no-cache", action="store_true", help="disable the bitcode cache"
     )
+    parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="extra include directory for the C library headers (repeatable)",
+    )
     args = parser.parse_args()
 
     clang = shutil.which("clang")
@@ -125,6 +139,12 @@ def main() -> int:
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
+    # Freestanding include directory shipping a minimal <string.h>; the rest
+    # of the standard headers (stdint, stddef, stdbool, limits) come from
+    # clang's builtin headers.
+    include_dirs = [Path(__file__).resolve().parent / "include"]
+    include_dirs += [Path(path).resolve() for path in args.include]
+
     compile_flags = [
         clang,
         f"--target={args.target}",
@@ -134,13 +154,14 @@ def main() -> int:
         "-flto",
         "-emit-llvm",
         "-c",
+        "-ffreestanding",
         "-ffunction-sections",
         "-fdata-sections",
         "-I",
         str(cmsis_nn / "Include"),
-        "-I",
-        "/usr/include/newlib",
     ]
+    for include_dir in include_dirs:
+        compile_flags.extend(["-I", str(include_dir)])
     if "+vfp" in args.features or args.target.endswith("eabihf"):
         compile_flags.append("-mfloat-abi=hard")
 
@@ -157,8 +178,8 @@ def main() -> int:
             "llvm-nm": tool_version("llvm-nm"),
         }
         key = compute_cache_key(
-            cmsis_nn, shim, args.target, args.cpu, args.features, compile_flags,
-            tool_versions,
+            cmsis_nn, shim, include_dirs, args.target, args.cpu, args.features,
+            compile_flags, tool_versions,
         )
         cached = cache_dir / f"{key}.bc"
         if cached.exists():
