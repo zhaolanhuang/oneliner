@@ -11,6 +11,12 @@ fn main() {
         include_bytes!("memory-mve.x")
     } else if env::var("CARGO_FEATURE_M33").is_ok() {
         include_bytes!("memory-m33.x")
+    } else if env::var("CARGO_FEATURE_M4F").is_ok() {
+        include_bytes!("memory-m4f.x")
+    } else if env::var("CARGO_FEATURE_M4").is_ok() {
+        include_bytes!("memory-m4.x")
+    } else if env::var("CARGO_FEATURE_M0").is_ok() {
+        include_bytes!("memory-m0.x")
     } else {
         include_bytes!("memory-m3.x")
     };
@@ -20,9 +26,9 @@ fn main() {
         .write_all(memory)
         .unwrap();
     println!("cargo:rustc-link-search={}", out.display());
-    println!("cargo:rerun-if-changed=memory-m3.x");
-    println!("cargo:rerun-if-changed=memory-m33.x");
-    println!("cargo:rerun-if-changed=memory-mve.x");
+    for name in ["m0", "m3", "m4", "m4f", "m33", "mve"] {
+        println!("cargo:rerun-if-changed=memory-{name}.x");
+    }
 
     println!("cargo:rustc-link-arg-bins=--nmagic");
     println!("cargo:rustc-link-arg-bins=-Tlink.x");

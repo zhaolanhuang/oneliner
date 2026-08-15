@@ -21,10 +21,17 @@ oneliner = { path = "../../oneliner", default-features = false, features = ["ire
 
 [features]
 default = ["m3"]
+# M0 runs on the QEMU microbit machine (Cortex-M0, nRF51). Its 16KB SRAM is
+# too small for the example models.
+m0 = []
 # M3 runs on the QEMU mps2-an385 machine (Cortex-M3).
 m3 = []
-# M33 runs on the QEMU mps2-an521 machine (Cortex-M33), built with the
-# built-in thumbv8m.main-none-eabihf target.
+# M4 (soft float) runs on the QEMU mps2-an386 machine (Cortex-M4).
+m4 = []
+# M4F (hard float) runs on the QEMU olimex-stm32-h405 machine (Cortex-M4F).
+m4f = []
+# M33 runs on the QEMU mps2-an505 machine (Cortex-M33), built with the
+# built-in thumbv8m.main-none-eabi[ hf] target.
 m33 = []
 # MVE runs on the QEMU mps3-an547 machine (Cortex-M55) and needs a custom
 # Rust target with the +mve feature: build with
