@@ -373,6 +373,9 @@ module {
             "-128, 127, 1073741825]>",
             output,
         )
+        # The replacement removes the requant output init (defined between the
+        # pool op and the requant), so the ukernel must allocate its own.
+        self.assertIn("%cmsis_nn_0_empty = tensor.empty()", output)
         self.assertNotIn("linalg.pooling_nhwc_sum", output)
 
     def test_leaves_avg_pool_with_padding_unchanged(self):

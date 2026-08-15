@@ -1,0 +1,40 @@
+[package]
+name = "qemu-cmsis-nn"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "qemu-cmsis-nn"
+test = false
+bench = false
+
+[dependencies]
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+cortex-m-semihosting = "0.5.0"
+panic-halt = "0.2.0"
+static_cell = "2.1.1"
+portable-atomic = { version = "1", default-features = false, features = ["critical-section"] }
+
+oneliner = { path = "../../oneliner", default-features = false, features = ["iree-runtime"] }
+
+[features]
+default = ["m3"]
+# M3 runs on the QEMU mps2-an385 machine (Cortex-M3).
+m3 = []
+# M33 runs on the QEMU mps2-an521 machine (Cortex-M33), built with the
+# built-in thumbv8m.main-none-eabihf target.
+m33 = []
+# MVE runs on the QEMU mps3-an547 machine (Cortex-M55) and needs a custom
+# Rust target with the +mve feature: build with
+# `--target thumbv8m.main-none-eabihf.json --features mve`.
+mve = []
+# Use the MCUNet visual-wake-word model instead of LeNet5.
+mcunet = []
+
+[profile.release]
+debug = 2
+lto = true
+opt-level = 'z'
+codegen-units = 1

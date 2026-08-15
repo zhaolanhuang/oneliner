@@ -1011,12 +1011,16 @@ def rewrite(text: str, kernel_class: str = "dsp") -> tuple[str, int]:
         ]
         generated = [
             f"{indent}%{prefix}_config = arith.constant dense<{config_values}> : tensor<15xi32>",
+            # The requant output init lives between the pool op and the
+            # requant generic, which this replacement removes, so allocate a
+            # fresh output tensor for the ukernel.
+            f"{indent}%{prefix}_empty = tensor.empty() : {output_type}",
             f'{indent}{result} = iree_linalg_ext.custom_op {{indexing_maps = [{", ".join(maps)}], '
             f'iterator_types = []}} attributes {{'
             f'iree_codegen.ukernel = #iree_codegen.ukernel_descriptor<"oneliner_cmsis_nn_avg_pool_s8", bitcode>, '
             f'hal.executable.objects = [#hal.executable.object<{{path = "{BITCODE_PATH}"}}>]}} '
             f'ins({pool.input_value}, %{prefix}_config : {pool.input_type}, tensor<15xi32>) '
-            f'outs({output_init} : {output_type}) {{',
+            f'outs(%{prefix}_empty : {output_type}) {{',
             f'{indent}^bb0(%input: tensor<?x?x?x?xi8>, %config: tensor<?xi32>, '
             f'%out: tensor<?x?x?x?xi8>):',
             f"{indent}  iree_linalg_ext.yield %out : tensor<?x?x?x?xi8>",
