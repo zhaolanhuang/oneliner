@@ -31,56 +31,73 @@ SOURCES = [
     "Source/ConvolutionFunctions/arm_nn_mat_mult_kernel_s8_s16.c",
     "Source/FullyConnectedFunctions/arm_fully_connected_s8.c",
     "Source/PoolingFunctions/arm_max_pool_s8.c",
+    "Source/NNSupportFunctions/arm_nn_depthwise_conv_nt_t_s8.c",
     "Source/NNSupportFunctions/arm_nn_mat_mult_nt_t_s8.c",
     "Source/NNSupportFunctions/arm_nn_vec_mat_mult_t_s8.c",
     "Source/NNSupportFunctions/arm_q7_to_q15_with_offset.c",
     "Source/NNSupportFunctions/arm_s8_to_s16_unordered_with_offset.c",
+    "Source/TransposeFunctions/arm_transpose_s8.c",
 ]
 
 # Precompiled Cortex-M variants shipped with the macro crate. The id doubles
 # as the file name (without the .bc suffix) and as the lookup key in
-# manifest.json.
+# manifest.json; it must be unique per (triple, cpu) since e.g. the
+# thumbv8m.main triples cover both Cortex-M33 and Cortex-M55.
 VARIANTS = [
     {
-        "id": "thumbv6m-none-eabi",
+        "id": "thumbv6m-none-eabi__cortex-m0",
         "triple": "thumbv6m-none-eabi",
         "cpu": "cortex-m0",
         "features": "+strict-align,+atomics-32",
         "float_abi": "soft",
     },
     {
-        "id": "thumbv7m-none-eabi",
+        "id": "thumbv7m-none-eabi__cortex-m3",
         "triple": "thumbv7m-none-eabi",
         "cpu": "cortex-m3",
         "features": "",
         "float_abi": "soft",
     },
     {
-        "id": "thumbv7em-none-eabi",
+        "id": "thumbv7em-none-eabi__cortex-m4",
         "triple": "thumbv7em-none-eabi",
         "cpu": "cortex-m4",
         "features": "",
         "float_abi": "soft",
     },
     {
-        "id": "thumbv7em-none-eabihf",
+        "id": "thumbv7em-none-eabihf__cortex-m4",
         "triple": "thumbv7em-none-eabihf",
         "cpu": "cortex-m4",
         "features": "+vfp4d16sp",
         "float_abi": "hard",
     },
     {
-        "id": "thumbv8m.main-none-eabi",
+        "id": "thumbv8m.main-none-eabi__cortex-m33",
         "triple": "thumbv8m.main-none-eabi",
         "cpu": "cortex-m33",
         "features": "",
         "float_abi": "soft",
     },
     {
-        "id": "thumbv8m.main-none-eabihf",
+        "id": "thumbv8m.main-none-eabihf__cortex-m33",
         "triple": "thumbv8m.main-none-eabihf",
         "cpu": "cortex-m33",
         "features": "+fp-armv8d16sp",
+        "float_abi": "hard",
+    },
+    {
+        "id": "thumbv8m.main-none-eabi__cortex-m55",
+        "triple": "thumbv8m.main-none-eabi",
+        "cpu": "cortex-m55",
+        "features": "+mve",
+        "float_abi": "soft",
+    },
+    {
+        "id": "thumbv8m.main-none-eabihf__cortex-m55",
+        "triple": "thumbv8m.main-none-eabihf",
+        "cpu": "cortex-m55",
+        "features": "+mve.fp",
         "float_abi": "hard",
     },
 ]
@@ -193,8 +210,8 @@ def build_one(
         compile_flags.extend(["-I", str(include_dir)])
     if float_abi == "hard":
         compile_flags.append("-mfloat-abi=hard")
-        # A hard-float ABI on Cortex-M33 requires an FPU selection.
-        if cpu == "cortex-m33":
+        # A hard-float ABI on an ARMv8-M core requires an explicit FPU.
+        if cpu in ("cortex-m33", "cortex-m55"):
             compile_flags.append("-mfpu=fpv5-d16")
 
     cached: Path | None = None

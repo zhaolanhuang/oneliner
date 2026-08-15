@@ -216,7 +216,7 @@ Use it when reducing duplicate RAM use matters more than concurrent inference. T
 
 ## CMSIS-NN
 
-CMSIS-NN lowering is disabled by default. Enable it per model on a supported Cortex-M target (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[ hf]`, `thumbv8m.main-none-eabi[ hf]`):
+CMSIS-NN lowering is disabled by default. Enable it per model on a supported Cortex-M target (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[ hf]`, `thumbv8m.main-none-eabi[ hf]`). Cortex-M55/MVE is selected on the `thumbv8m.main` triples when the target's features include `+mve` (e.g. via a custom Rust target based on `thumbv8m.main-none-eabi` with `features = ["+mve"]`):
 
 ```rust
 #[model("models/model.tflite", cmsis_nn = true)]

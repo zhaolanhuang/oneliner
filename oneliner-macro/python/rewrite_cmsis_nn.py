@@ -18,6 +18,9 @@ UKERNEL_NAMES = (
     "oneliner_cmsis_nn_depthwise_conv_s8",
     "oneliner_cmsis_nn_avg_pool_s8",
 )
+# CMSIS-NN CH_IN_BLOCK_MVE: number of channels processed per block by the MVE
+# depthwise conv opt kernel. Matches arm_nnsupportfunctions.h.
+CH_IN_BLOCK_MVE = 124
 
 
 @dataclass(frozen=True)
@@ -548,7 +551,7 @@ def depthwise_requant_match(
     return None
 
 
-def rewrite(text: str) -> tuple[str, int]:
+def rewrite(text: str, kernel_class: str = "dsp") -> tuple[str, int]:
     lines = text.splitlines()
     constants = scalar_constants(lines)
     replacements: list[tuple[int, int, list[str]]] = []
@@ -602,15 +605,22 @@ def rewrite(text: str) -> tuple[str, int]:
                 and bias_bytes is not None
             ):
                 prefix = f"cmsis_nn_{rewritten}"
+                # MVE fully connected needs an output-depth int32 buffer for
+                # the bias-accumulator init (kernel_sum); DSP needs none.
+                fc_scratch_size = (
+                    output_shape[3] * 4 if kernel_class == "mve" else 0
+                )
+                fc_scratch_len = max(1, fc_scratch_size)
                 config_values = [
                     input_shape[0], input_shape[3], output_shape[3],
                     -conv.input_zero_point, 0, output_offset, multiplier,
                     31 - shift, activation_min, activation_max,
+                    fc_scratch_size,
                 ]
                 indent = re.match(r"\s*", lines[req_start]).group(0)
                 generated = [
-                    f"{indent}%{prefix}_config = arith.constant dense<{config_values}> : tensor<10xi32>",
-                    f"{indent}%{prefix}_scratch = tensor.empty() : tensor<1xi8>",
+                    f"{indent}%{prefix}_config = arith.constant dense<{config_values}> : tensor<11xi32>",
+                    f"{indent}%{prefix}_scratch = tensor.empty() : tensor<{fc_scratch_len}xi8>",
                 ]
                 tensor_values = [
                     conv.input_value,
@@ -623,8 +633,8 @@ def rewrite(text: str) -> tuple[str, int]:
                     conv.input_type,
                     source_filter_type,
                     bias_type,
-                    "tensor<1xi8>",
-                    "tensor<10xi32>",
+                    f"tensor<{fc_scratch_len}xi8>",
+                    "tensor<11xi32>",
                 ]
                 symbols = ", ".join(f"s{index}" for index in range(14))
                 maps = [
@@ -707,7 +717,11 @@ def rewrite(text: str) -> tuple[str, int]:
             and dilation_h == 1
             and dilation_w == 1
         )
-        scratch_size = 0 if is_1x1 else 4 * ((rhs_cols + 3) // 4 * 4)
+        if kernel_class == "mve":
+            # arm_convolve_s8 MVE im2col buffer: 4 * ceil(rhs_cols/16) * 16.
+            scratch_size = 0 if is_1x1 else 4 * ((rhs_cols + 15) // 16 * 16)
+        else:
+            scratch_size = 0 if is_1x1 else 4 * ((rhs_cols + 3) // 4 * 4)
         scratch_len = max(1, scratch_size)
         cmsis_shifts = [31 - value for value in shift_values]
         prefix = f"cmsis_nn_{rewritten}"
@@ -832,8 +846,13 @@ def rewrite(text: str) -> tuple[str, int]:
         if total_pad_h % 2 or total_pad_w % 2:
             continue
         pad_h, pad_w = total_pad_h // 2, total_pad_w // 2
-        uses_3x3 = filter_shape[:2] == (3, 3) and pad_h <= 1 and pad_w <= 1
-        scratch_size = 0 if uses_3x3 else 2 * input_shape[3] * filter_h * filter_w
+        if kernel_class == "mve":
+            # MVE never uses the 3x3 kernel; all depthwise go through
+            # arm_depthwise_conv_s8_opt with a CH_IN_BLOCK_MVE (=124) buffer.
+            scratch_size = 4 * CH_IN_BLOCK_MVE * filter_h * filter_w
+        else:
+            uses_3x3 = filter_shape[:2] == (3, 3) and pad_h <= 1 and pad_w <= 1
+            scratch_size = 0 if uses_3x3 else 2 * input_shape[3] * filter_h * filter_w
         scratch_len = max(1, scratch_size)
         config_values = [
             input_shape[0], input_shape[1], input_shape[2], input_shape[3],
@@ -1041,9 +1060,17 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-match", action="store_true")
     parser.add_argument("--finalize-configured", action="store_true")
+    parser.add_argument(
+        "--kernel-class",
+        choices=("dsp", "mve"),
+        default="dsp",
+        help="CMSIS-NN kernel family of the target (affects scratch sizes)",
+    )
     args = parser.parse_args()
-    operation = finalize_configured if args.finalize_configured else rewrite
-    output, count = operation(sys.stdin.read())
+    if args.finalize_configured:
+        output, count = finalize_configured(sys.stdin.read())
+    else:
+        output, count = rewrite(sys.stdin.read(), args.kernel_class)
     if args.require_match and count == 0:
         print("no supported CMSIS-NN int8 operation found", file=sys.stderr)
         return 1

@@ -194,7 +194,7 @@ void oneliner_cmsis_nn_avg_pool_s8(const int8_t *input_base,
 }
 
 // Config: N, ACCUM_DEPTH, OUTPUT_DEPTH, INPUT_OFFSET, FILTER_OFFSET,
-// OUTPUT_OFFSET, MULTIPLIER, SHIFT, ACT_MIN, ACT_MAX.
+// OUTPUT_OFFSET, MULTIPLIER, SHIFT, ACT_MIN, ACT_MAX, SCRATCH_SIZE.
 void oneliner_cmsis_nn_fully_connected_s8(
     const int8_t *input_base, size_t input_offset, const int8_t *filter_base,
     size_t filter_offset, const int32_t *bias_base, size_t bias_offset,
@@ -206,7 +206,16 @@ void oneliner_cmsis_nn_fully_connected_s8(
   int8_t *scratch = TENSOR(int8_t, scratch_base, scratch_offset);
   const int32_t *config = CONST_TENSOR(int32_t, config_base, config_offset);
   int8_t *output = TENSOR(int8_t, output_base, output_offset);
-  cmsis_nn_context context = {.buf = scratch, .size = 0};
+#if defined(ARM_MATH_MVEI)
+  // MVE fully connected initializes its accumulators from a per-output-depth
+  // int32 buffer, so the scratch must hold a copy of the bias.
+  const int32_t output_depth = config[2];
+  int32_t *kernel_sum = (int32_t *)scratch;
+  for (int32_t i = 0; i < output_depth; i++) {
+    kernel_sum[i] = bias[i];
+  }
+#endif
+  cmsis_nn_context context = {.buf = scratch, .size = config[10]};
   cmsis_nn_fc_params params = {
       .input_offset = config[3],
       .filter_offset = config[4],

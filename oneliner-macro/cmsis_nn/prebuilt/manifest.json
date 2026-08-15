@@ -2,52 +2,68 @@
   "llvm_major": 22,
   "variants": [
     {
-      "id": "thumbv6m-none-eabi",
+      "id": "thumbv6m-none-eabi__cortex-m0",
       "triple": "thumbv6m-none-eabi",
       "cpu": "cortex-m0",
       "features": "+strict-align,+atomics-32",
       "float_abi": "soft",
-      "file": "thumbv6m-none-eabi.bc"
+      "file": "thumbv6m-none-eabi__cortex-m0.bc"
     },
     {
-      "id": "thumbv7m-none-eabi",
+      "id": "thumbv7m-none-eabi__cortex-m3",
       "triple": "thumbv7m-none-eabi",
       "cpu": "cortex-m3",
       "features": "",
       "float_abi": "soft",
-      "file": "thumbv7m-none-eabi.bc"
+      "file": "thumbv7m-none-eabi__cortex-m3.bc"
     },
     {
-      "id": "thumbv7em-none-eabi",
+      "id": "thumbv7em-none-eabi__cortex-m4",
       "triple": "thumbv7em-none-eabi",
       "cpu": "cortex-m4",
       "features": "",
       "float_abi": "soft",
-      "file": "thumbv7em-none-eabi.bc"
+      "file": "thumbv7em-none-eabi__cortex-m4.bc"
     },
     {
-      "id": "thumbv7em-none-eabihf",
+      "id": "thumbv7em-none-eabihf__cortex-m4",
       "triple": "thumbv7em-none-eabihf",
       "cpu": "cortex-m4",
       "features": "+vfp4d16sp",
       "float_abi": "hard",
-      "file": "thumbv7em-none-eabihf.bc"
+      "file": "thumbv7em-none-eabihf__cortex-m4.bc"
     },
     {
-      "id": "thumbv8m.main-none-eabi",
+      "id": "thumbv8m.main-none-eabi__cortex-m33",
       "triple": "thumbv8m.main-none-eabi",
       "cpu": "cortex-m33",
       "features": "",
       "float_abi": "soft",
-      "file": "thumbv8m.main-none-eabi.bc"
+      "file": "thumbv8m.main-none-eabi__cortex-m33.bc"
     },
     {
-      "id": "thumbv8m.main-none-eabihf",
+      "id": "thumbv8m.main-none-eabihf__cortex-m33",
       "triple": "thumbv8m.main-none-eabihf",
       "cpu": "cortex-m33",
       "features": "+fp-armv8d16sp",
       "float_abi": "hard",
-      "file": "thumbv8m.main-none-eabihf.bc"
+      "file": "thumbv8m.main-none-eabihf__cortex-m33.bc"
+    },
+    {
+      "id": "thumbv8m.main-none-eabi__cortex-m55",
+      "triple": "thumbv8m.main-none-eabi",
+      "cpu": "cortex-m55",
+      "features": "+mve",
+      "float_abi": "soft",
+      "file": "thumbv8m.main-none-eabi__cortex-m55.bc"
+    },
+    {
+      "id": "thumbv8m.main-none-eabihf__cortex-m55",
+      "triple": "thumbv8m.main-none-eabihf",
+      "cpu": "cortex-m55",
+      "features": "+mve.fp",
+      "float_abi": "hard",
+      "file": "thumbv8m.main-none-eabihf__cortex-m55.bc"
     }
   ]
 }

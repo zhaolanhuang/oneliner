@@ -98,6 +98,42 @@ module {{
 """
 
 
+def conv_5x5_fixture():
+    return """
+module {
+  func.func @main() {
+    %c0_i32 = arith.constant 0 : i32
+    %c-128_i32 = arith.constant -128 : i32
+    %c127_i32 = arith.constant 127 : i32
+    %weights = arith.constant dense<0> : tensor<6x5x5x1xi8>
+    %bias = arith.constant dense<[1, 2, 3, 4, 5, 6]> : tensor<6xi32>
+    %mult = arith.constant dense<[1, 2, 3, 4, 5, 6]> : tensor<6xi32>
+    %shift = arith.constant dense<[41, 41, 40, 40, 41, 42]> : tensor<6xi8>
+    %input = tensor.empty() : tensor<1x28x28x1xi8>
+    %filter_init = tensor.empty() : tensor<5x5x1x6xi8>
+    %filter = linalg.transpose ins(%weights : tensor<6x5x5x1xi8>) outs(%filter_init : tensor<5x5x1x6xi8>) permutation = [1, 2, 3, 0]
+    %acc = tensor.empty() : tensor<1x24x24x6xi32>
+    %bias_init = linalg.generic {indexing_maps = [], iterator_types = []} ins(%bias : tensor<6xi32>) outs(%acc : tensor<1x24x24x6xi32>) {
+    ^bb0(%in: i32, %out: i32):
+      linalg.yield %in : i32
+    } -> tensor<1x24x24x6xi32>
+    %conv = linalg.conv_2d_nhwc_hwcf_q {dilations = dense<1> : tensor<2xi64>, strides = dense<1> : tensor<2xi64>} ins(%input, %filter, %c-128_i32, %c0_i32 : tensor<1x28x28x1xi8>, tensor<5x5x1x6xi8>, i32, i32) outs(%bias_init : tensor<1x24x24x6xi32>) -> tensor<1x24x24x6xi32>
+    %output = tensor.empty() : tensor<1x24x24x6xi8>
+    %result = linalg.generic {indexing_maps = [], iterator_types = []} ins(%conv, %mult, %shift : tensor<1x24x24x6xi32>, tensor<6xi32>, tensor<6xi8>) outs(%output : tensor<1x24x24x6xi8>) {
+    ^bb0(%in: i32, %m: i32, %s: i8, %out: i8):
+      %scaled = tosa.apply_scale %in, %m, %s {rounding_mode = DOUBLE_ROUND} : (i32, i32, i8) -> i32
+      %offset = arith.addi %scaled, %c-128_i32 : i32
+      %clamped_min = arith.maxsi %offset, %c-128_i32 : i32
+      %clamped = arith.minsi %clamped_min, %c127_i32 : i32
+      %value = arith.trunci %clamped : i32 to i8
+      linalg.yield %value : i8
+    } -> tensor<1x24x24x6xi8>
+    return
+  }
+}
+"""
+
+
 def avgpool_fixture(input_size=2, output_size=1, window_size=2, stride=2, channels=4):
     return f"""
 module {{
@@ -132,41 +168,48 @@ module {{
 """
 
 
-class CmsisNNRewriteTests(unittest.TestCase):
-    def test_rewrites_static_int8_conv_and_converts_shift(self):
-        fixture = """
+def fc_fixture():
+    return """
 module {
   func.func @main() {
     %c0_i32 = arith.constant 0 : i32
     %c-128_i32 = arith.constant -128 : i32
     %c127_i32 = arith.constant 127 : i32
-    %weights = arith.constant dense<0> : tensor<6x5x5x1xi8>
-    %bias = arith.constant dense<[1, 2, 3, 4, 5, 6]> : tensor<6xi32>
-    %mult = arith.constant dense<[1, 2, 3, 4, 5, 6]> : tensor<6xi32>
-    %shift = arith.constant dense<[41, 41, 40, 40, 41, 42]> : tensor<6xi8>
-    %input = tensor.empty() : tensor<1x28x28x1xi8>
-    %filter_init = tensor.empty() : tensor<5x5x1x6xi8>
-    %filter = linalg.transpose ins(%weights : tensor<6x5x5x1xi8>) outs(%filter_init : tensor<5x5x1x6xi8>) permutation = [1, 2, 3, 0]
-    %acc = tensor.empty() : tensor<1x24x24x6xi32>
-    %bias_init = linalg.generic {indexing_maps = [], iterator_types = []} ins(%bias : tensor<6xi32>) outs(%acc : tensor<1x24x24x6xi32>) {
+    %cmult_i64 = arith.constant 1073741824 : i64
+    %cshift_i64 = arith.constant 39 : i64
+    %weights = arith.constant dense<[1, 2, 3, 4, 5, 6]> : tensor<2x1x1x3xi8>
+    %bias = arith.constant dense<[7, 8]> : tensor<2xi32>
+    %input = tensor.empty() : tensor<1x1x1x3xi8>
+    %filter_empty = tensor.empty() : tensor<1x1x3x2xi8>
+    %filter = linalg.transpose ins(%weights : tensor<2x1x1x3xi8>) outs(%filter_empty : tensor<1x1x3x2xi8>) permutation = [1, 2, 3, 0]
+    %acc_empty = tensor.empty() : tensor<1x1x1x2xi32>
+    %acc_init = linalg.generic {indexing_maps = [], iterator_types = []} ins(%bias : tensor<2xi32>) outs(%acc_empty : tensor<1x1x1x2xi32>) {
     ^bb0(%in: i32, %out: i32):
       linalg.yield %in : i32
-    } -> tensor<1x24x24x6xi32>
-    %conv = linalg.conv_2d_nhwc_hwcf_q {dilations = dense<1> : tensor<2xi64>, strides = dense<1> : tensor<2xi64>} ins(%input, %filter, %c-128_i32, %c0_i32 : tensor<1x28x28x1xi8>, tensor<5x5x1x6xi8>, i32, i32) outs(%bias_init : tensor<1x24x24x6xi32>) -> tensor<1x24x24x6xi32>
-    %output = tensor.empty() : tensor<1x24x24x6xi8>
-    %result = linalg.generic {indexing_maps = [], iterator_types = []} ins(%conv, %mult, %shift : tensor<1x24x24x6xi32>, tensor<6xi32>, tensor<6xi8>) outs(%output : tensor<1x24x24x6xi8>) {
-    ^bb0(%in: i32, %m: i32, %s: i8, %out: i8):
-      %scaled = tosa.apply_scale %in, %m, %s {rounding_mode = DOUBLE_ROUND} : (i32, i32, i8) -> i32
-      %offset = arith.addi %scaled, %c-128_i32 : i32
+    } -> tensor<1x1x1x2xi32>
+    %conv = linalg.conv_2d_nhwc_hwcf_q {dilations = dense<1> : tensor<2xi64>, strides = dense<1> : tensor<2xi64>} ins(%input, %filter, %c-128_i32, %c0_i32 : tensor<1x1x1x3xi8>, tensor<1x1x3x2xi8>, i32, i32) outs(%acc_init : tensor<1x1x1x2xi32>) -> tensor<1x1x1x2xi32>
+    %output = tensor.empty() : tensor<1x1x1x2xi8>
+    %result = linalg.generic {indexing_maps = [], iterator_types = []} ins(%conv : tensor<1x1x1x2xi32>) outs(%output : tensor<1x1x1x2xi8>) {
+    ^bb0(%in: i32, %out: i8):
+      %extended = arith.extsi %in : i32 to i64
+      %scaled = arith.muli %extended, %cmult_i64 : i64
+      %rounded = arith.shrsi %scaled, %cshift_i64 : i64
+      %value32 = arith.trunci %rounded : i64 to i32
+      %offset = arith.addi %value32, %c-128_i32 : i32
       %clamped_min = arith.maxsi %offset, %c-128_i32 : i32
       %clamped = arith.minsi %clamped_min, %c127_i32 : i32
       %value = arith.trunci %clamped : i32 to i8
       linalg.yield %value : i8
-    } -> tensor<1x24x24x6xi8>
+    } -> tensor<1x1x1x2xi8>
     return
   }
 }
 """
+
+
+class CmsisNNRewriteTests(unittest.TestCase):
+    def test_rewrites_static_int8_conv_and_converts_shift(self):
+        fixture = conv_5x5_fixture()
 
         output, count = REWRITER.rewrite(fixture)
 
@@ -242,42 +285,7 @@ module {
         self.assertNotIn("linalg.pooling_nhwc_max", output)
 
     def test_rewrites_fully_connected_form(self):
-        fixture = """
-module {
-  func.func @main() {
-    %c0_i32 = arith.constant 0 : i32
-    %c-128_i32 = arith.constant -128 : i32
-    %c127_i32 = arith.constant 127 : i32
-    %cmult_i64 = arith.constant 1073741824 : i64
-    %cshift_i64 = arith.constant 39 : i64
-    %weights = arith.constant dense<[1, 2, 3, 4, 5, 6]> : tensor<2x1x1x3xi8>
-    %bias = arith.constant dense<[7, 8]> : tensor<2xi32>
-    %input = tensor.empty() : tensor<1x1x1x3xi8>
-    %filter_empty = tensor.empty() : tensor<1x1x3x2xi8>
-    %filter = linalg.transpose ins(%weights : tensor<2x1x1x3xi8>) outs(%filter_empty : tensor<1x1x3x2xi8>) permutation = [1, 2, 3, 0]
-    %acc_empty = tensor.empty() : tensor<1x1x1x2xi32>
-    %acc_init = linalg.generic {indexing_maps = [], iterator_types = []} ins(%bias : tensor<2xi32>) outs(%acc_empty : tensor<1x1x1x2xi32>) {
-    ^bb0(%in: i32, %out: i32):
-      linalg.yield %in : i32
-    } -> tensor<1x1x1x2xi32>
-    %conv = linalg.conv_2d_nhwc_hwcf_q {dilations = dense<1> : tensor<2xi64>, strides = dense<1> : tensor<2xi64>} ins(%input, %filter, %c-128_i32, %c0_i32 : tensor<1x1x1x3xi8>, tensor<1x1x3x2xi8>, i32, i32) outs(%acc_init : tensor<1x1x1x2xi32>) -> tensor<1x1x1x2xi32>
-    %output = tensor.empty() : tensor<1x1x1x2xi8>
-    %result = linalg.generic {indexing_maps = [], iterator_types = []} ins(%conv : tensor<1x1x1x2xi32>) outs(%output : tensor<1x1x1x2xi8>) {
-    ^bb0(%in: i32, %out: i8):
-      %extended = arith.extsi %in : i32 to i64
-      %scaled = arith.muli %extended, %cmult_i64 : i64
-      %rounded = arith.shrsi %scaled, %cshift_i64 : i64
-      %value32 = arith.trunci %rounded : i64 to i32
-      %offset = arith.addi %value32, %c-128_i32 : i32
-      %clamped_min = arith.maxsi %offset, %c-128_i32 : i32
-      %clamped = arith.minsi %clamped_min, %c127_i32 : i32
-      %value = arith.trunci %clamped : i32 to i8
-      linalg.yield %value : i8
-    } -> tensor<1x1x1x2xi8>
-    return
-  }
-}
-"""
+        fixture = fc_fixture()
 
         output, count = REWRITER.rewrite(fixture)
 
@@ -287,9 +295,39 @@ module {
             '"oneliner_cmsis_nn_fully_connected_s8", bitcode>',
             output,
         )
-        self.assertIn("tensor<10xi32>", output)
+        self.assertIn("tensor<11xi32>", output)
         self.assertIn("ins(%input, %weights, %bias,", output)
         self.assertNotIn("arith.muli", output)
+
+    def test_fully_connected_mve_allocates_bias_scratch(self):
+        output, count = REWRITER.rewrite(fc_fixture(), "mve")
+
+        self.assertEqual(count, 1)
+        self.assertIn("tensor<8xi8>", output)
+        self.assertIn("dense<[1, 3, 2, 128, 0, -128, 1073741824, -8, -128, 127, 8]>", output)
+
+    def test_conv_mve_allocates_mve_scratch(self):
+        output, count = REWRITER.rewrite(conv_5x5_fixture(), "mve")
+
+        # 5x5 conv, rhs_cols = 25 -> MVE buffer = 4 * ceil(25/16) * 16 = 128.
+        self.assertEqual(count, 1)
+        self.assertIn("tensor<128xi8>", output)
+        self.assertIn(
+            "dense<[1, 28, 28, 1, 24, 24, 6, 5, 5, 1, 1, 1, 1, 0, 0, "
+            "128, -128, -128, 127, 128]>",
+            output,
+        )
+
+    def test_depthwise_mve_allocates_ch_block_scratch(self):
+        output, count = REWRITER.rewrite(depthwise_fixture(), "mve")
+
+        self.assertEqual(count, 1)
+        self.assertIn("tensor<4464xi8>", output)
+        self.assertIn(
+            "dense<[1, 5, 5, 2, 3, 3, 2, 3, 3, 1, 1, 1, 1, 0, 0, "
+            "128, -128, -128, 127, 1, 4464]>",
+            output,
+        )
 
     def test_rewrites_depthwise_with_hex_encoded_shifts(self):
         output, count = REWRITER.rewrite(depthwise_fixture())
