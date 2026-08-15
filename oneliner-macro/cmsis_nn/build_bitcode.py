@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -37,6 +40,61 @@ def run(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
+def tool_version(name: str) -> str:
+    path = shutil.which(name)
+    if path is None:
+        return f"{name}:missing"
+    try:
+        version = subprocess.check_output(
+            [path, "--version"], text=True, stderr=subprocess.STDOUT
+        )
+    except (OSError, subprocess.CalledProcessError):
+        version = ""
+    return f"{path}:{version}"
+
+
+def compute_cache_key(
+    cmsis_nn: Path,
+    shim: Path,
+    target: str,
+    cpu: str,
+    features: str,
+    compile_flags: list[str],
+    tool_versions: dict[str, str],
+) -> str:
+    digest = hashlib.sha256()
+    for component in (target, cpu, features):
+        digest.update(component.encode())
+        digest.update(b"\0")
+    for flag in compile_flags:
+        digest.update(flag.encode())
+        digest.update(b"\0")
+    for name, version in tool_versions.items():
+        digest.update(name.encode())
+        digest.update(version.encode())
+        digest.update(b"\0")
+    digest.update(shim.read_bytes())
+    for source in SOURCES:
+        digest.update((cmsis_nn / source).read_bytes())
+    for header in sorted((cmsis_nn / "Include").rglob("*")):
+        if header.is_file():
+            digest.update(header.relative_to(cmsis_nn).as_posix().encode())
+            digest.update(b"\0")
+            digest.update(header.read_bytes())
+    return digest.hexdigest()
+
+
+def check_no_undefined_symbols(llvm_nm: str, bitcode: Path) -> bool:
+    undefined = subprocess.check_output(
+        [llvm_nm, "--undefined-only", str(bitcode)], text=True
+    )
+    if undefined:
+        print("linked CMSIS-NN bitcode has undefined symbols:", file=sys.stderr)
+        print(undefined, end="", file=sys.stderr)
+        return False
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cmsis-nn", type=Path, required=True)
@@ -45,6 +103,15 @@ def main() -> int:
     parser.add_argument("--target", required=True)
     parser.add_argument("--cpu", required=True)
     parser.add_argument("--features", default="")
+    parser.add_argument(
+        "--cache",
+        type=Path,
+        default=None,
+        help="bitcode cache directory (default: <workspace>/target/cmsis-nn-bc)",
+    )
+    parser.add_argument(
+        "--no-cache", action="store_true", help="disable the bitcode cache"
+    )
     args = parser.parse_args()
 
     clang = shutil.which("clang")
@@ -57,8 +124,6 @@ def main() -> int:
     shim = args.shim.resolve()
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    object_dir = output.parent / "cmsis-nn-bc"
-    object_dir.mkdir(parents=True, exist_ok=True)
 
     compile_flags = [
         clang,
@@ -79,6 +144,34 @@ def main() -> int:
     if "+vfp" in args.features or args.target.endswith("eabihf"):
         compile_flags.append("-mfloat-abi=hard")
 
+    cache_dir: Path | None = None
+    if not args.no_cache:
+        cache_dir = args.cache
+        if cache_dir is None:
+            cache_dir = cmsis_nn.parent.parent / "target" / "cmsis-nn-bc"
+        cache_dir = cache_dir.resolve()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tool_versions = {
+            "clang": tool_version("clang"),
+            "llvm-link": tool_version("llvm-link"),
+            "llvm-nm": tool_version("llvm-nm"),
+        }
+        key = compute_cache_key(
+            cmsis_nn, shim, args.target, args.cpu, args.features, compile_flags,
+            tool_versions,
+        )
+        cached = cache_dir / f"{key}.bc"
+        if cached.exists():
+            shutil.copyfile(cached, output)
+            if not check_no_undefined_symbols(llvm_nm, output):
+                return 1
+            return 0
+    else:
+        cached = None
+
+    object_dir = output.parent / "cmsis-nn-bc"
+    object_dir.mkdir(parents=True, exist_ok=True)
+
     inputs = [shim, *(cmsis_nn / source for source in SOURCES)]
     bitcode_files: list[Path] = []
     for index, source in enumerate(inputs):
@@ -87,13 +180,15 @@ def main() -> int:
         bitcode_files.append(bitcode)
 
     run([llvm_link, *(str(path) for path in bitcode_files), "-o", str(output)])
-    undefined = subprocess.check_output(
-        [llvm_nm, "--undefined-only", str(output)], text=True
-    )
-    if undefined:
-        print("linked CMSIS-NN bitcode has undefined symbols:", file=sys.stderr)
-        print(undefined, end="", file=sys.stderr)
+    if not check_no_undefined_symbols(llvm_nm, output):
         return 1
+
+    if cache_dir is not None and cached is not None:
+        fd, temporary = tempfile.mkstemp(dir=cache_dir, suffix=".tmp")
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(output.read_bytes())
+        os.replace(temporary, cached)
+
     return 0
 
 
