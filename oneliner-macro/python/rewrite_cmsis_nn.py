@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -164,6 +165,11 @@ def find_conv(line: str, constants: dict[str, int]) -> ConvMatch | None:
 
 
 def find_pool(line: str) -> PoolMatch | None:
+    # Pooling ukernels are slower than the standard codegen for small
+    # tensors on Cortex-M4 (measured on nRF52840DK); only rewrite when
+    # explicitly enabled.
+    if os.environ.get("ONELINER_CMSIS_NN_POOL") is None:
+        return None
     pattern = re.compile(
         rf"^\s*({SSA})\s*=\s*linalg\.pooling_nhwc_max\s*"
         rf"(?P<attrs>\{{.*?\}})\s*ins\("
@@ -190,6 +196,8 @@ def find_pool(line: str) -> PoolMatch | None:
 
 
 def find_avgpool(line: str) -> AvgPoolMatch | None:
+    if os.environ.get("ONELINER_CMSIS_NN_POOL") is None:
+        return None
     pattern = re.compile(
         rf"^\s*({SSA})\s*=\s*linalg\.pooling_nhwc_sum\s*"
         rf"(?P<attrs>\{{.*?\}})\s*ins\("
@@ -457,6 +465,12 @@ def fill_scalar(
 def scalar_requant_match(
     lines: list[str], conv: ConvMatch, start: int, constants: dict[str, int]
 ) -> tuple[int, int, str, str, str, int, int, int, int, int] | None:
+    # Fully connected ukernels are slower than the standard codegen on
+    # Cortex-M4 (measured on nRF52840DK: ~2-5 ms for LeNet5's three layers,
+    # mostly flash access to the weight matrix); only rewrite when
+    # explicitly enabled.
+    if os.environ.get("ONELINER_CMSIS_NN_FC") is None:
+        return None
     use_pattern = re.compile(
         rf"^\s*({SSA})\s*=\s*linalg\.generic\s+.*ins\("
         rf"{re.escape(conv.result)}\s*:\s*{re.escape(conv.accumulator_type)}\)\s*"
@@ -672,6 +686,16 @@ def rewrite(text: str, kernel_class: str = "dsp") -> tuple[str, int]:
 
         requant = requant_match(lines, conv, conv_index, constants)
         if requant is None:
+            continue
+        # The generic arm_convolve_s8 (im2col + matmul) is slower than the
+        # standard codegen for large filters with few channels (measured on
+        # nRF52840DK: LeNet5's 5x5 convs add ~4.5 ms). Only rewrite filters
+        # up to 3x3; the 1x1 fast paths are unaffected. Override with
+        # ONELINER_CMSIS_NN_MAX_CONV_FILTER_AREA.
+        max_filter_area = int(
+            os.environ.get("ONELINER_CMSIS_NN_MAX_CONV_FILTER_AREA", "9")
+        )
+        if filter_shape[0] * filter_shape[1] > max_filter_area:
             continue
 
         (

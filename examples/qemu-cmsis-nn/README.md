@@ -90,9 +90,30 @@ ELF sections.
 
 CMSIS-NN is faster than the standard codegen for both models in QEMU. On
 real hardware (nRF52840DK) the LeNet5 latency went from 254 ms to ~49 ms
-(after the bitcode fix described below; the standard codegen takes ~41 ms).
-MCUNet with CMSIS-NN saves ~72 KB Flash (13%) and ~-0.5 KB RAM vs the
-standard codegen.
+(after the bitcode fix described below). The remaining gap (49 ms vs
+~41 ms for the standard codegen) was traced to the fully connected,
+pooling, and generic (im2col) conv ukernels, which measure slower than
+the standard codegen on the device. The rewriter now gates those behind
+opt-in environment variables (see below), so the default configuration is
+on par with the standard codegen for tiny models like LeNet5 (~41 ms)
+while keeping the CMSIS-NN speedup for MCUNet (~632 ms vs ~691 ms, i.e.
+8.5% faster on nRF52840DK).
+
+## Ukernel gating
+
+The rewriter only uses CMSIS-NN where it is actually faster on Cortex-M4
+hardware (measured on nRF52840DK):
+
+- 1x1 conv (fast path) and depthwise conv: always rewritten.
+- Generic conv (im2col + matmul): rewritten only for filters up to 3x3.
+- Fully connected and pooling: not rewritten by default.
+
+The defaults can be overridden with:
+
+- `ONELINER_CMSIS_NN_MAX_CONV_FILTER_AREA` (default `9`): rewrite generic
+  convs with `filter_h * filter_w` up to this value.
+- `ONELINER_CMSIS_NN_FC=1`: rewrite fully connected layers.
+- `ONELINER_CMSIS_NN_POOL=1`: rewrite max/avg pooling.
 
 ## Bitcode build notes
 
