@@ -197,11 +197,10 @@ def build_one(
         f"-mcpu={cpu}",
         "-mthumb",
         "-O3",
+        "-ffast-math",
         "-flto",
         "-emit-llvm",
         "-c",
-        "-ffunction-sections",
-        "-fdata-sections",
         "-I",
         str(cmsis_nn / "Include"),
     ]
