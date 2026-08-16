@@ -59,13 +59,33 @@ qemu-system-arm -machine mps3-an547 -nographic -semihosting \
 
 Add `--features mcunet` to any build to run the MCUNet visual-wake-word model.
 
-## MVE caveat
+## MVE
 
-The MVE build boots and links the MVE prebuilt bitcode on `mps3-an547`, but
-QEMU 8.2.2's MVE (Helium) emulation is broken: even a bare `vldrb.u8` /
-`vstrb.u8` vector register round-trip and a `vadd.i8` return all zeros
-(verified with a minimal inline-asm probe in this example). Because every MVE
-vector operation produces zeros, both the CMSIS-NN ukernels and the standard
-IREE MVE codegen (`cmsis_nn = false`) produce wrong results. This is a QEMU
-bug, not an Oneliner/CMSIS-NN issue. Validate MVE numerics on real M55
-hardware or a QEMU release with working MVE support.
+Both models validate on `mps3-an547` (Cortex-M55) with `cmsis_nn = true` under
+QEMU 11.1+ (the ARMv7M SysTick and the STM32 RCC are not emulated, so MVE
+timing still needs real hardware). Two MVE bugs were found and fixed here:
+
+- CMSIS-NN's MVE fully connected does not apply the input offset; the shim
+  precomputes the kernel-sum buffer as `bias + input_offset * row_sum`.
+- IREE 3.12 (LLVM 24) generates incorrect code for the non-ukernel MVE ops;
+  the toolchain strips `+mve` from iree-compile's main codegen, keeping the
+  prebuilt MVE ukernels.
+
+## Benchmark (QEMU emulation, Cortex-M4F)
+
+Measured on `olimex-stm32-h405` (STM32F405) with `-icount 1`, 128
+inferences/iteration, host wall clock. QEMU has no working guest cycle
+counter, so the latency is QEMU emulation throughput, not real hardware
+(CMsis-NN's DSP instructions emulate slowly in QEMU). Flash/RAM come from the
+ELF sections.
+
+| Model | cmsis_nn | Flash | RAM | latency/iter (QEMU) |
+|---|---|---|---|---|
+| LeNet5 | on | 82.8 KB | 8.7 KB | ~44 ms |
+| LeNet5 | off | 77.5 KB | 8.6 KB | ~6.6 ms |
+| MCUNet | on | 478.8 KB | 95.6 KB | ~535 ms |
+| MCUNet | off | 548.7 KB | 117.6 KB | ~135 ms |
+
+MCUNet with CMSIS-NN saves ~70 KB Flash (13%) and ~22 KB RAM (19%); for tiny
+models like LeNet5 the ukernel overhead can exceed the codegen savings. The
+QEMU latency numbers overstate CMSIS-NN and must be re-measured on hardware.
