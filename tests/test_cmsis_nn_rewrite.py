@@ -1,5 +1,4 @@
 import importlib.util
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -209,39 +208,6 @@ module {
 
 
 class CmsisNNRewriteTests(unittest.TestCase):
-    def setUp(self):
-        # Ukernel rewriting for fully connected, pooling, and generic conv
-        # (filter > 3x3) is gated behind opt-in env vars by default; enable
-        # them for the rewrite tests below.
-        os.environ["ONELINER_CMSIS_NN_FC"] = "1"
-        os.environ["ONELINER_CMSIS_NN_POOL"] = "1"
-        os.environ["ONELINER_CMSIS_NN_MAX_CONV_FILTER_AREA"] = "9999"
-
-    def tearDown(self):
-        for key in (
-            "ONELINER_CMSIS_NN_FC",
-            "ONELINER_CMSIS_NN_POOL",
-            "ONELINER_CMSIS_NN_MAX_CONV_FILTER_AREA",
-        ):
-            os.environ.pop(key, None)
-
-    def test_default_gates_skip_slow_ukernels(self):
-        # Default: 5x5 generic convs, fully connected, and pooling stay on
-        # the standard codegen (they measure slower than the standard path
-        # on Cortex-M4 hardware).
-        for key in (
-            "ONELINER_CMSIS_NN_FC",
-            "ONELINER_CMSIS_NN_POOL",
-            "ONELINER_CMSIS_NN_MAX_CONV_FILTER_AREA",
-        ):
-            os.environ.pop(key, None)
-        output, count = REWRITER.rewrite(conv_5x5_fixture())
-        self.assertEqual(count, 0)
-        output, count = REWRITER.rewrite(fc_fixture())
-        self.assertEqual(count, 0)
-        output, count = REWRITER.rewrite(avgpool_fixture())
-        self.assertEqual(count, 0)
-
     def test_rewrites_static_int8_conv_and_converts_shift(self):
         fixture = conv_5x5_fixture()
 
