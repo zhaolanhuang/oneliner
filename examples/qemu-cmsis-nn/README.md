@@ -66,7 +66,9 @@ QEMU 11.1+ (the ARMv7M SysTick and the STM32 RCC are not emulated, so MVE
 timing still needs real hardware). Two MVE bugs were found and fixed here:
 
 - CMSIS-NN's MVE fully connected does not apply the input offset; the shim
-  precomputes the kernel-sum buffer as `bias + input_offset * row_sum`.
+  routes fully connected layers through `arm_nn_mat_mult_nt_t_s8`, which
+  applies the input offset on both the DSP and MVE paths (and is also faster
+  than `arm_fully_connected_s8` on Cortex-M4).
 - IREE 3.12 (LLVM 24) generates incorrect code for the non-ukernel MVE ops;
   the toolchain strips `+mve` from iree-compile's main codegen, keeping the
   prebuilt MVE ukernels.
@@ -76,16 +78,34 @@ timing still needs real hardware). Two MVE bugs were found and fixed here:
 Measured on `olimex-stm32-h405` (STM32F405) with `-icount 1`, 128
 inferences/iteration, host wall clock. QEMU has no working guest cycle
 counter, so the latency is QEMU emulation throughput, not real hardware
-(CMsis-NN's DSP instructions emulate slowly in QEMU). Flash/RAM come from the
+(CMSIS-NN's DSP instructions emulate slowly in QEMU). Flash/RAM come from the
 ELF sections.
 
 | Model | cmsis_nn | Flash | RAM | latency/iter (QEMU) |
 |---|---|---|---|---|
-| LeNet5 | on | 82.8 KB | 8.7 KB | ~44 ms |
-| LeNet5 | off | 77.5 KB | 8.6 KB | ~6.6 ms |
-| MCUNet | on | 478.8 KB | 95.6 KB | ~535 ms |
-| MCUNet | off | 548.7 KB | 117.6 KB | ~135 ms |
+| LeNet5 | on | 83.7 KB | ~0.4 KB | ~6.5 ms |
+| LeNet5 | off | 79.0 KB | ~0.4 KB | ~7.3 ms |
+| MCUNet | on | 488.0 KB | ~2.0 KB | ~67 ms |
+| MCUNet | off | 560.2 KB | ~1.5 KB | ~103 ms |
 
-MCUNet with CMSIS-NN saves ~70 KB Flash (13%) and ~22 KB RAM (19%); for tiny
-models like LeNet5 the ukernel overhead can exceed the codegen savings. The
-QEMU latency numbers overstate CMSIS-NN and must be re-measured on hardware.
+CMSIS-NN is faster than the standard codegen for both models in QEMU. On
+real hardware (nRF52840DK) the LeNet5 latency went from 254 ms to ~49 ms
+(after the bitcode fix described below; the standard codegen takes ~41 ms).
+MCUNet with CMSIS-NN saves ~72 KB Flash (13%) and ~-0.5 KB RAM vs the
+standard codegen.
+
+## Bitcode build notes
+
+The ukernel bitcode is compiled with clang `-O3 -flto` for each Cortex-M
+variant. Two things were essential for performance:
+
+- The CMSIS-NN sources call `memcpy`/`memset` for unaligned accesses. The
+  bitcode build ships a minimal `<string.h>` (see `include/`) so the
+  prototypes exist, but `-ffreestanding` disables clang's builtin
+  `memcpy`, leaving real `__aeabi_memcpy` calls in the innermost
+  matmul loops. Dropping `-ffreestanding` lets clang inline them into
+  single loads/stores; on nRF52840DK this took LeNet5 from ~254 ms to
+  ~49 ms.
+- `arm_nn_mat_mult_kernel_s8_s16` keeps its SMLAD blocks only when the
+  accumulator packing is recognized; the remaining scalar byte mul-adds
+  dominate the convolution kernels for small channel counts.

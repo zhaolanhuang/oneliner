@@ -200,7 +200,6 @@ def build_one(
         "-flto",
         "-emit-llvm",
         "-c",
-        "-ffreestanding",
         "-ffunction-sections",
         "-fdata-sections",
         "-I",
@@ -319,7 +318,7 @@ def main() -> int:
     cmsis_nn = args.cmsis_nn.resolve()
     shim = args.shim.resolve()
 
-    # Freestanding include directory shipping a minimal <string.h>; the rest
+    # Minimal include directory shipping <string.h>; the rest
     # of the standard headers (stdint, stddef, stdbool, limits) come from
     # clang's builtin headers.
     include_dirs = [Path(__file__).resolve().parent / "include"]

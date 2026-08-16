@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "arm_nnfunctions.h"
+#include "arm_nnsupportfunctions.h"
 
 #define CONST_TENSOR(type, base, byte_offset)                                  \
   ((const type *)((const uint8_t *)(base) + (byte_offset)))
@@ -29,9 +30,9 @@ void oneliner_aeabi_memset(void *dest, size_t size, int value) {
   }
 }
 
-// The bitcode is compiled with -ffreestanding, so CMSIS-NN's calls to memset
-// and memcpy resolve to these plain symbols instead of the __aeabi_* entry
-// points. Both sets are provided so the ukernel never depends on a C library.
+// The ukernel bitcode is freestanding: CMSIS-NN's memcpy/memset calls are
+// inlined by clang (see build_bitcode.py), but keep plain symbols around so
+// the bitcode never depends on a C library.
 void *memset(void *dest, int value, size_t size) {
   oneliner_aeabi_memset(dest, size, value);
   return dest;
@@ -204,45 +205,33 @@ void oneliner_cmsis_nn_fully_connected_s8(
   const int8_t *filter = CONST_TENSOR(int8_t, filter_base, filter_offset);
   const int32_t *bias = bias_base + bias_offset;
   int8_t *scratch = TENSOR(int8_t, scratch_base, scratch_offset);
+  (void)scratch;
   const int32_t *config = CONST_TENSOR(int32_t, config_base, config_offset);
   int8_t *output = TENSOR(int8_t, output_base, output_offset);
-#if defined(ARM_MATH_MVEI)
-  // The MVE fully connected kernel does not apply the input offset itself
-  // (unlike the DSP path): it initializes the accumulator from a
-  // per-output-depth int32 buffer and accumulates sum(input_raw * weight).
-  // The correct result is bias + input_offset * sum(weights) + sum(input*W),
-  // so the buffer must hold the "kernel sum": bias + input_offset * row_sum.
-  const int32_t accum_depth = config[1];
-  const int32_t output_depth = config[2];
+  // A fully connected layer is a 1x1 convolution: use the fast matmul kernel
+  // instead of arm_fully_connected_s8. arm_nn_vec_mat_mult_t_s8 is several
+  // times slower than the standard codegen for these sizes on Cortex-M4 (its
+  // DSP path is compiled to scalar byte mul-adds by clang), while
+  // arm_nn_mat_mult_nt_t_s8 lowers to the SIMD kernels and applies the input
+  // offset itself.
   const int32_t input_offset_val = config[3];
-  int32_t *kernel_sum = (int32_t *)scratch;
-  for (int32_t i = 0; i < output_depth; i++) {
-    int32_t row_sum = 0;
-    for (int32_t j = 0; j < accum_depth; j++) {
-      row_sum += filter[i * accum_depth + j];
-    }
-    kernel_sum[i] = bias[i] + input_offset_val * row_sum;
+  const int32_t output_offset_val = config[5];
+  const int32_t multiplier = config[6];
+  const int32_t shift = config[7];
+  const int32_t activation_min = config[8];
+  const int32_t activation_max = config[9];
+  // arm_nn_mat_mult_nt_t_s8 indexes the multiplier/shift arrays per output
+  // row, so materialize the per-tensor quant params as per-channel arrays.
+  int32_t multipliers[config[2]];
+  int32_t shifts[config[2]];
+  for (int32_t i = 0; i < config[2]; i++) {
+    multipliers[i] = multiplier;
+    shifts[i] = shift;
   }
-#endif
-  cmsis_nn_context context = {.buf = scratch, .size = config[10]};
-  cmsis_nn_fc_params params = {
-      .input_offset = config[3],
-      .filter_offset = config[4],
-      .output_offset = config[5],
-      .activation = {.min = config[8], .max = config[9]},
-  };
-  cmsis_nn_per_tensor_quant_params quant = {
-      .multiplier = config[6],
-      .shift = config[7],
-  };
-  cmsis_nn_dims input_dims = {.n = config[0], .h = 1, .w = 1, .c = config[1]};
-  cmsis_nn_dims filter_dims = {.n = config[1], .h = 1, .w = 1, .c = config[2]};
-  cmsis_nn_dims bias_dims = {.n = 1, .h = 1, .w = 1, .c = config[2]};
-  cmsis_nn_dims output_dims = {.n = config[0], .h = 1, .w = 1, .c = config[2]};
-
-  arm_cmsis_nn_status status = arm_fully_connected_s8(
-      &context, &params, &quant, &input_dims, input, &filter_dims, filter,
-      &bias_dims, bias, &output_dims, output);
+  arm_cmsis_nn_status status = arm_nn_mat_mult_nt_t_s8(
+      input, filter, bias, output, multipliers, shifts, 1, config[2],
+      config[1], input_offset_val, output_offset_val, activation_min,
+      activation_max, config[2], config[1]);
   if (status != ARM_CMSIS_NN_SUCCESS) {
     oneliner_fail_fill(output, config[0] * config[2]);
   }
