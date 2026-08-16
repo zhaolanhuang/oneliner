@@ -207,12 +207,21 @@ void oneliner_cmsis_nn_fully_connected_s8(
   const int32_t *config = CONST_TENSOR(int32_t, config_base, config_offset);
   int8_t *output = TENSOR(int8_t, output_base, output_offset);
 #if defined(ARM_MATH_MVEI)
-  // MVE fully connected initializes its accumulators from a per-output-depth
-  // int32 buffer, so the scratch must hold a copy of the bias.
+  // The MVE fully connected kernel does not apply the input offset itself
+  // (unlike the DSP path): it initializes the accumulator from a
+  // per-output-depth int32 buffer and accumulates sum(input_raw * weight).
+  // The correct result is bias + input_offset * sum(weights) + sum(input*W),
+  // so the buffer must hold the "kernel sum": bias + input_offset * row_sum.
+  const int32_t accum_depth = config[1];
   const int32_t output_depth = config[2];
+  const int32_t input_offset_val = config[3];
   int32_t *kernel_sum = (int32_t *)scratch;
   for (int32_t i = 0; i < output_depth; i++) {
-    kernel_sum[i] = bias[i];
+    int32_t row_sum = 0;
+    for (int32_t j = 0; j < accum_depth; j++) {
+      row_sum += filter[i * accum_depth + j];
+    }
+    kernel_sum[i] = bias[i] + input_offset_val * row_sum;
   }
 #endif
   cmsis_nn_context context = {.buf = scratch, .size = config[10]};

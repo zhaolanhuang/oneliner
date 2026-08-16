@@ -151,8 +151,28 @@ fn configure_iree_target(
         }
     }
     if let Some(features) = cpu_features {
+        // IREE 3.12 (LLVM 24) generates incorrect code when non-ukernel ops
+        // are compiled for MVE without an explicit -mcpu=cortex-m55 (which
+        // IREE rejects for bare-metal ARM triples). Keep the CMSIS-NN
+        // ukernels MVE (they are precompiled with -mcpu=cortex-m55), but
+        // compile the surrounding IREE code without +mve, which is correct.
+        let features = if matches!(target_cpu, Some("cortex-m55" | "cortex-m85")) {
+            sanitize_iree_cpu_features(features)
+        } else {
+            features.to_owned()
+        };
         command.arg(format!("--iree-llvmcpu-target-cpu-features={features}"));
     }
+}
+
+/// Drops the MVE features from an LLVM feature list (see
+/// `configure_iree_target`).
+fn sanitize_iree_cpu_features(cpu_features: &str) -> String {
+    cpu_features
+        .split(',')
+        .filter(|feature| *feature != "+mve" && *feature != "+mve.fp")
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn run_iree_compile_with_cmsis_nn(
