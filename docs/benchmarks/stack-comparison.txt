@@ -22,17 +22,33 @@ Arena from the build-time report; peak RAM = arena + stack high-water.
 | arena | 5,184 B | 5,184 B |
 | stack high-water | 10,880 B | 10,880 B |
 
-## Analysis
+## Analysis (objdump-verified)
 
-The vMCU ukernel C functions use only small fixed stack frames (no VLAs,
-no large locals). The measured stack is dominated by the IREE codegen
-dispatcher: the toolchain allows up to 64 KiB of dispatch-local stack
-(--iree-llvmcpu-stack-allocation-limit=65536), and in vMCU mode the ops
-that stay on IREE codegen (MCUNet block-0 shim, FC head, quantize/
-dequantize, HAL boundaries) allocate large intermediates there. Standard
-mode runs everything through those dispatchers (38 KB); vMCU is slightly
-higher (47 KB) because the leftover dispatches plus ukernel call frames
-accumulate. LeNet5 has no large dispatches, so both modes sit at 10,880 B.
+Frame-size audit of both binaries (largest `sub sp, sp, #N`):
+
+- Standard: only main() has a large frame (37,120 B); the IREE dispatchers
+  use the arena and have small frames.
+- vMCU: same main() frame (37,120 B) plus per-dispatch frames 8,832 /
+  8,576 / 7,328 / 6,880 / 6,304 / 5,280 / 5,152 ... owned by the
+  `main_dispatch_*_custom_op_*` wrappers.
+
+Sources of the stack:
+
+1. main()'s 37,120 B frame is identical in both variants (example code,
+   not vMCU-specific). It contains the per-iteration `InputTensor::new(7)`
+   local (12,288 B; the model input is a value type) plus the benchmark
+   and printing machinery; it is NOT the vMCU-vs-standard difference.
+2. The vMCU-only difference (~9 KB at the high-water mark) comes from the
+   IREE custom-op dispatch wrappers: each ukernel call's scratch/segment
+   and non-in-place output buffers are allocated on the dispatcher's own
+   stack frame (the frame sizes match the scratch sizes, e.g. 8,448 B
+   segment). The toolchain permits up to 64 KiB of dispatch-local stack
+   (--iree-llvmcpu-stack-allocation-limit=65536).
+3. The vMCU C ukernels themselves use only small fixed frames.
+
+LeNet5: both modes sit at 10,880 B (its dispatches have no large frames).
 
 Even with the stack counted, vMCU peak RAM is 82 KB vs 158 KB standard
-(-48%). Reducing the dispatch stack limit is a further tuning lever.
+(-48%). The ukernel scratch is placed on the dispatch stack by IREE's
+bufferization; moving it into the arena (or lowering the dispatch stack
+limit) is a further tuning lever.
