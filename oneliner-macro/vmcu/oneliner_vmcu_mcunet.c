@@ -381,11 +381,16 @@ static void mcunet_kernel(
         const size_t rotation = stride_height / dilation_height;
         if (rotation < kernel_height) {
           if (alias) {
-            ring_start =
-                (ring_start + kernel_height - rotation) % kernel_height;
+            ring_start += kernel_height - rotation;
+            if (ring_start >= kernel_height) {
+              ring_start -= kernel_height;
+            }
             last_new_ky = rotation;
           } else {
-            ring_start = (ring_start + rotation) % kernel_height;
+            ring_start += rotation;
+            if (ring_start >= kernel_height) {
+              ring_start -= kernel_height;
+            }
             first_new_ky = kernel_height - rotation;
           }
         } else {
