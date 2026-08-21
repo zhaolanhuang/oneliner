@@ -103,9 +103,23 @@ static int valid_zero_point(int32_t zero_point) {
 
 static void copy_bytes(int8_t *destination, const int8_t *source,
                        size_t count) {
-  size_t i;
-  for (i = 0; i < count; ++i) {
-    destination[i] = source[i];
+  if ((((uintptr_t)source | (uintptr_t)destination) & 3U) == 0U) {
+    const uint32_t *source32 = (const uint32_t *)(const void *)source;
+    uint32_t *destination32 = (uint32_t *)(void *)destination;
+    size_t words = count >> 2;
+    size_t i;
+    for (i = 0U; i < words; ++i) {
+      destination32[i] = source32[i];
+    }
+    count &= 3U;
+    source += words << 2;
+    destination += words << 2;
+  }
+  while (count != 0U) {
+    *destination = *source;
+    ++destination;
+    ++source;
+    --count;
   }
 }
 
