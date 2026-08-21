@@ -206,6 +206,22 @@ def require_zero_point(value: ir.Value, label: str) -> int:
     return result
 
 
+def pad_low_high(pad: ir.Operation, label: str) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    dynamic = -(1 << 63)
+    if "static_low" in pad.attributes and "static_high" in pad.attributes:
+        low = tuple(int(item) for item in pad.attributes["static_low"])
+        high = tuple(int(item) for item in pad.attributes["static_high"])
+        if all(item != dynamic for item in low) and all(item != dynamic for item in high):
+            if len(low) != 4 or len(high) != 4:
+                raise ValueError(f"{label} padding must be rank-4")
+            return low, high
+    low = tuple(require_scalar(value, f"{label} low padding") for value in pad.operands[1:5])
+    high = tuple(require_scalar(value, f"{label} high padding") for value in pad.operands[5:9])
+    if len(low) != 4 or len(high) != 4:
+        raise ValueError(f"{label} padding must be rank-4")
+    return low, high
+
+
 def require_constant_tensor(value: ir.Value, element_type: str, shape: tuple[int, ...], label: str) -> None:
     owner = owner_operation(value)
     if owner is None or owner.name != "arith.constant" or tensor_shape(value, element_type, len(shape)) != shape:
@@ -745,8 +761,7 @@ def match_conv(candidate: ir.Operation, label: str) -> ConvStage:
     input_value = candidate.operands[0]
     if pad is not None and pad.name == "tensor.pad":
         input_value = pad.operands[0]
-        low = tuple(require_scalar(value, f"{label} low padding") for value in pad.operands[1:5])
-        high = tuple(require_scalar(value, f"{label} high padding") for value in pad.operands[5:9])
+        low, high = pad_low_high(pad, label)
         if low[0] or low[3] or high[0] or high[3]:
             raise ValueError(f"{label} may only pad spatial dimensions")
         _, pad_body = body(pad, ("tensor.yield",), f"{label} pad")
@@ -895,8 +910,7 @@ def match_ib_block(dw: ir.Operation, expansion_op: ir.Operation, projection_op: 
     dilations = dense_ints(dw.attributes["dilations"])
     if len(strides) != 2 or len(dilations) != 2:
         raise ValueError(f"block {number} depthwise geometry is malformed")
-    low = tuple(require_scalar(value, f"block {number} low padding") for value in pad.operands[1:5])
-    high = tuple(require_scalar(value, f"block {number} high padding") for value in pad.operands[5:9])
+    low, high = pad_low_high(pad, f"block {number}")
     if low[0] or low[3] or high[0] or high[3]:
         raise ValueError(f"block {number} may only pad spatial dimensions")
     _, pad_body = body(pad, ("tensor.yield",), f"block {number} pad")
@@ -1001,8 +1015,7 @@ def match_depthwise_standalone(dw: ir.Operation, dw_collapse: ir.Operation, bias
     input_value = dw.operands[0]
     if pad is not None and pad.name == "tensor.pad":
         input_value = pad.operands[0]
-        low = tuple(require_scalar(value, "depthwise low padding") for value in pad.operands[1:5])
-        high = tuple(require_scalar(value, "depthwise high padding") for value in pad.operands[5:9])
+        low, high = pad_low_high(pad, "depthwise")
         if low[0] or low[3] or high[0] or high[3]:
             raise ValueError("depthwise may only pad spatial dimensions")
         _, pad_body = body(pad, ("tensor.yield",), "depthwise pad")
