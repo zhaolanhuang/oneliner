@@ -1,0 +1,38 @@
+# Stack high-water comparison (QEMU, sentinel-fill measurement)
+
+Method: fill [_stack_end, sp - 1KB) with 0xAA before 30 inference runs,
+scan for the deepest non-sentinel byte after; stack = _stack_start - deepest.
+Arena from the build-time report; peak RAM = arena + stack high-water.
+
+## Cortex-M4 (mps2-an386), MCUNet
+| | standard | vMCU auto |
+| --- | --- | --- |
+| arena | 119,552 B | 34,880 B |
+| stack high-water | 38,368 B | 47,272 B |
+| peak (arena + stack) | 157,920 B | 82,152 B (-48%) |
+
+## Cortex-M7 (mps2-an500), MCUNet
+| | standard | vMCU auto |
+| --- | --- | --- |
+| stack high-water | 38,368 B | 47,272 B |
+
+## Cortex-M4, LeNet5
+| | standard | vMCU auto |
+| --- | --- | --- |
+| arena | 5,184 B | 5,184 B |
+| stack high-water | 10,880 B | 10,880 B |
+
+## Analysis
+
+The vMCU ukernel C functions use only small fixed stack frames (no VLAs,
+no large locals). The measured stack is dominated by the IREE codegen
+dispatcher: the toolchain allows up to 64 KiB of dispatch-local stack
+(--iree-llvmcpu-stack-allocation-limit=65536), and in vMCU mode the ops
+that stay on IREE codegen (MCUNet block-0 shim, FC head, quantize/
+dequantize, HAL boundaries) allocate large intermediates there. Standard
+mode runs everything through those dispatchers (38 KB); vMCU is slightly
+higher (47 KB) because the leftover dispatches plus ukernel call frames
+accumulate. LeNet5 has no large dispatches, so both modes sit at 10,880 B.
+
+Even with the stack counted, vMCU peak RAM is 82 KB vs 158 KB standard
+(-48%). Reducing the dispatch stack limit is a further tuning lever.

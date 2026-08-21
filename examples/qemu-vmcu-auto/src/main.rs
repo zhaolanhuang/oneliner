@@ -24,6 +24,46 @@ struct Model;
 const EXPECTED: [i8; 2] = [4, -5];
 const ITERATIONS: u32 = 30;
 
+unsafe extern "C" {
+    static _stack_start: u8;
+    static _stack_end: u8;
+}
+
+const STACK_SENTINEL_MARGIN: usize = 1024;
+
+fn fill_stack_sentinel() {
+    let bottom = &raw const _stack_end as usize;
+    let mut sp: usize = 0;
+    unsafe {
+        core::arch::asm!("mov {0}, sp", out(reg) sp);
+    }
+    if sp > bottom + STACK_SENTINEL_MARGIN {
+        unsafe {
+            core::ptr::write_bytes(
+                bottom as *mut u8,
+                0xAA,
+                sp - bottom - STACK_SENTINEL_MARGIN,
+            );
+        }
+    }
+}
+
+fn stack_high_water_bytes() -> usize {
+    let top = &raw const _stack_start as usize;
+    let bottom = &raw const _stack_end as usize;
+    let mut p = top;
+    let mut deepest = top;
+    unsafe {
+        while p > bottom {
+            p -= 1;
+            if *((p) as *const u8) != 0xAA {
+                deepest = p;
+            }
+        }
+    }
+    top - deepest
+}
+
 static INPUT: ConstStaticCell<<Model as ModelInference>::InputTensor> =
     ConstStaticCell::new(<Model as ModelInference>::InputTensor::new(7));
 
@@ -37,6 +77,8 @@ fn main() -> ! {
         artifacts.input_size,
         artifacts.output_size
     );
+
+    fill_stack_sentinel();
 
     let mut peripherals = cortex_m::Peripherals::take().unwrap();
     let syst = &mut peripherals.SYST;
@@ -77,6 +119,7 @@ fn main() -> ! {
     } else {
         let _ = hprintln!("latency: all iterations wrapped the 24-bit SysTick counter");
     }
+    let _ = hprintln!("stack high-water: {} bytes", stack_high_water_bytes());
     if actual == EXPECTED {
         let _ = hprintln!("MCUNet QEMU validation PASSED");
         debug::exit(EXIT_SUCCESS);
