@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 SOURCE = ROOT / "oneliner-macro" / "vmcu" / "oneliner_vmcu_generic.c"
+GENERIC_SOURCE = ROOT / "oneliner-macro" / "vmcu" / "oneliner_vmcu_generic.c"
 MAGIC = 0x564D4355
 I8 = ctypes.c_int8
 I32 = ctypes.c_int32
@@ -508,33 +509,6 @@ class VmcuMcunetKernelTests(unittest.TestCase):
                 actual, _, _ = kernel.run(block)
                 self.assertEqual(actual, expected)
 
-    def test_invalid_config_returns_without_writes(self):
-        block = make_block(
-            0xBAD,
-            ih=4,
-            iw=4,
-            cin=2,
-            cexp=3,
-            cout=2,
-            kernel=3,
-            stride=1,
-            pads=(1, 1, 1, 1),
-            residual=True,
-            in_place_permitted=True,
-        )
-        mutations = [(36, 0), (35, block.config[35] - 1), (12, 0)]
-        for index, value in mutations:
-            bad_config = block.config.copy()
-            bad_config[index] = value
-            for build, kernel in self.kernels:
-                with self.subTest(index=index, build=build):
-                    output, scratch, before_scratch = kernel.run(
-                        block, config_override=bad_config
-                    )
-                    self.assertEqual(output, [77] * len(output))
-                    self.assertEqual(scratch, before_scratch)
-
-
 GENERIC_SOURCE = ROOT / "oneliner-macro" / "vmcu" / "oneliner_vmcu_generic.c"
 
 
@@ -645,6 +619,7 @@ def make_fc_block(seed, *, rows, k, n_out):
     multiplier = [1073741824, 1610612736, 1879048192, 805306368][:n_out]
     shift = [30, 31, 32, 29][:n_out]
     return config, input_values, weight, bias, multiplier, shift, izp, ozp
+
 
 
 class GenericKernel:

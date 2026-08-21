@@ -8,16 +8,16 @@ static int oneliner_vmcu_conv2d_kernel(const int8_t *input, const int8_t *weight
   size_t n;
   size_t input_count;
   size_t output_count;
-  size_t weight_count;
-  size_t cache_bytes;
-  size_t required_scratch;
-  size_t effective_h;
-  size_t effective_w;
-  size_t padded_h;
-  size_t padded_w;
-  size_t computed_oh;
-  size_t computed_ow;
-  size_t tmp;
+
+
+
+
+
+
+
+
+
+
   size_t batches;
   size_t input_height;
   size_t input_width;
@@ -33,8 +33,6 @@ static int oneliner_vmcu_conv2d_kernel(const int8_t *input, const int8_t *weight
   size_t dilation_width;
   size_t pad_top;
   size_t pad_left;
-  size_t pad_bottom;
-  size_t pad_right;
   int32_t input_zero_point;
   int32_t output_zero_point;
 
@@ -47,25 +45,6 @@ static int oneliner_vmcu_conv2d_kernel(const int8_t *input, const int8_t *weight
       ((uintptr_t)config % _Alignof(int32_t)) != 0U) {
     return 0;
   }
-  if (config[0] != 1 || config[36] != VMCU_CONFIG_MAGIC || config[1] != 0) {
-    return 0;
-  }
-  for (n = 2U; n <= 14U; ++n) {
-    if (config[n] <= 0) {
-      return 0;
-    }
-  }
-  for (n = 15U; n <= 18U; ++n) {
-    if (config[n] < 0) {
-      return 0;
-    }
-  }
-  for (n = 21U; n <= 34U; ++n) {
-    if (config[n] != 0) {
-      return 0;
-    }
-  }
-
   batches = (size_t)config[2];
   input_height = (size_t)config[3];
   input_width = (size_t)config[4];
@@ -81,55 +60,11 @@ static int oneliner_vmcu_conv2d_kernel(const int8_t *input, const int8_t *weight
   dilation_width = (size_t)config[14];
   pad_top = (size_t)config[15];
   pad_left = (size_t)config[16];
-  pad_bottom = (size_t)config[17];
-  pad_right = (size_t)config[18];
   input_zero_point = config[19];
   output_zero_point = config[20];
 
-  if (!valid_zero_point(input_zero_point) ||
-      !valid_zero_point(output_zero_point) || config[35] < 0) {
-    return 0;
-  }
-  if (!checked_mul_size(kernel_height - 1U, dilation_height, &effective_h) ||
-      !checked_add_size(effective_h, 1U, &effective_h) ||
-      !checked_mul_size(kernel_width - 1U, dilation_width, &effective_w) ||
-      !checked_add_size(effective_w, 1U, &effective_w) ||
-      !checked_add_size(input_height, pad_top, &padded_h) ||
-      !checked_add_size(padded_h, pad_bottom, &padded_h) ||
-      !checked_add_size(input_width, pad_left, &padded_w) ||
-      !checked_add_size(padded_w, pad_right, &padded_w) ||
-      padded_h < effective_h || padded_w < effective_w) {
-    return 0;
-  }
-  computed_oh = (padded_h - effective_h) / stride_height + 1U;
-  computed_ow = (padded_w - effective_w) / stride_width + 1U;
-  if (computed_oh != output_height || computed_ow != output_width) {
-    return 0;
-  }
-
-  if (!checked_mul_size(batches, input_height, &tmp) ||
-      !checked_mul_size(tmp, input_width, &tmp) ||
-      !checked_mul_size(tmp, input_channels, &input_count) ||
-      !checked_mul_size(batches, output_height, &tmp) ||
-      !checked_mul_size(tmp, output_width, &tmp) ||
-      !checked_mul_size(tmp, output_channels, &output_count) ||
-      !checked_mul_size(kernel_height, kernel_width, &tmp) ||
-      !checked_mul_size(tmp, input_channels, &tmp) ||
-      !checked_mul_size(tmp, output_channels, &weight_count) ||
-      !checked_mul_size(kernel_height, input_width, &tmp) ||
-      !checked_mul_size(tmp, input_channels, &cache_bytes)) {
-    return 0;
-  }
-  if (!checked_add_size(cache_bytes, 0U, &required_scratch) ||
-      required_scratch > (size_t)INT32_MAX ||
-      (size_t)config[35] < required_scratch) {
-    return 0;
-  }
-  for (n = 0U; n < output_channels; ++n) {
-    if (!valid_shift(shift[n])) {
-      return 0;
-    }
-  }
+  input_count = batches * input_height * input_width * input_channels;
+  output_count = batches * output_height * output_width * output_channels;
 
   for (n = 0U; n < batches; ++n) {
     int8_t *const cache = scratch;

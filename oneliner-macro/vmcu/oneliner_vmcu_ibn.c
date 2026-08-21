@@ -10,34 +10,27 @@ static void oneliner_vmcu_ibn_kernel(
     const int32_t *m_depthwise, const int32_t *m_project,
     const int8_t *s_expand, const int8_t *s_depthwise,
     const int8_t *s_project, const int32_t *config, int8_t *output,
-    int8_t *scratch, size_t input_offset, size_t w_expand_offset,
-    size_t w_depthwise_offset, size_t w_project_offset,
-    size_t b_expand_offset, size_t b_depthwise_offset,
-    size_t b_project_offset, size_t m_expand_offset,
-    size_t m_depthwise_offset, size_t m_project_offset,
-    size_t s_expand_offset, size_t s_depthwise_offset,
-    size_t s_project_offset, size_t config_offset, size_t output_offset,
-    size_t scratch_offset) {
+    int8_t *scratch) {
   size_t n;
-  size_t input_count;
-  size_t output_count;
-  size_t expand_weight_count;
-  size_t depthwise_weight_count;
-  size_t project_weight_count;
-  size_t expanded_i32_bytes;
-  size_t output_i32_bytes;
+
+
+
+
+
+
+
   size_t cache_bytes;
   size_t depth_row_bytes;
   size_t delay_row_bytes;
-  size_t delay_bytes = 0U;
-  size_t required_scratch;
-  size_t effective_h;
-  size_t effective_w;
-  size_t padded_h;
-  size_t padded_w;
-  size_t computed_oh;
-  size_t computed_ow;
-  size_t tmp;
+
+
+
+
+
+
+
+
+
   size_t delay_rows;
   int flags;
   int residual;
@@ -59,7 +52,7 @@ static void oneliner_vmcu_ibn_kernel(
   size_t pad_top;
   size_t pad_left;
   size_t pad_bottom;
-  size_t pad_right;
+
   int32_t input_zero_point;
   int32_t expansion_zero_point;
   int32_t depthwise_zero_point;
@@ -83,19 +76,6 @@ static void oneliner_vmcu_ibn_kernel(
       ((uintptr_t)config % _Alignof(int32_t)) != 0U) {
     return;
   }
-  if (config[0] != 1 || config[36] != VMCU_CONFIG_MAGIC || config[1] < 0 ||
-      (config[1] & ~(VMCU_FLAG_RESIDUAL | VMCU_FLAG_IN_PLACE)) != 0) {
-    return;
-  }
-  for (n = 2U; n <= 19U; ++n) {
-    if (config[n] <= 0 && n <= 15U) {
-      return;
-    }
-    if (config[n] < 0) {
-      return;
-    }
-  }
-
   flags = config[1];
   residual = (flags & VMCU_FLAG_RESIDUAL) != 0;
   batches = (size_t)config[2];
@@ -115,7 +95,6 @@ static void oneliner_vmcu_ibn_kernel(
   pad_top = (size_t)config[16];
   pad_left = (size_t)config[17];
   pad_bottom = (size_t)config[18];
-  pad_right = (size_t)config[19];
   input_zero_point = config[20];
   expansion_zero_point = config[21];
   depthwise_zero_point = config[22];
@@ -123,114 +102,11 @@ static void oneliner_vmcu_ibn_kernel(
   output_zero_point = config[24];
   delay_rows = pad_bottom + 1U;
 
-  if (!valid_zero_point(input_zero_point) ||
-      !valid_zero_point(expansion_zero_point) ||
-      !valid_zero_point(depthwise_zero_point) ||
-      !valid_zero_point(projection_zero_point) ||
-      !valid_zero_point(output_zero_point) || config[35] < 0) {
-    return;
-  }
-  if (residual &&
-      (config[26] < 1 || config[26] > 62 || config[30] < 1 ||
-       config[30] > 62 || config[34] < 1 || config[34] > 62 ||
-       (config[27] != 0 && (config[28] < 1 || config[28] > 62)) ||
-       (config[31] != 0 && (config[32] < 1 || config[32] > 62)))) {
-    return;
-  }
-
-  if (!checked_mul_size(kernel_height - 1U, dilation_height, &effective_h) ||
-      !checked_add_size(effective_h, 1U, &effective_h) ||
-      !checked_mul_size(kernel_width - 1U, dilation_width, &effective_w) ||
-      !checked_add_size(effective_w, 1U, &effective_w) ||
-      !checked_add_size(input_height, pad_top, &padded_h) ||
-      !checked_add_size(padded_h, pad_bottom, &padded_h) ||
-      !checked_add_size(input_width, pad_left, &padded_w) ||
-      !checked_add_size(padded_w, pad_right, &padded_w) ||
-      padded_h < effective_h || padded_w < effective_w) {
-    return;
-  }
-  computed_oh = (padded_h - effective_h) / stride_height + 1U;
-  computed_ow = (padded_w - effective_w) / stride_width + 1U;
-  if (computed_oh != output_height || computed_ow != output_width) {
-    return;
-  }
-  if (residual && (output_height != input_height ||
-                   output_width != input_width ||
-                   output_channels != input_channels)) {
-    return;
-  }
-
-  if (!checked_mul_size(batches, input_height, &tmp) ||
-      !checked_mul_size(tmp, input_width, &tmp) ||
-      !checked_mul_size(tmp, input_channels, &input_count) ||
-      !checked_mul_size(batches, output_height, &tmp) ||
-      !checked_mul_size(tmp, output_width, &tmp) ||
-      !checked_mul_size(tmp, output_channels, &output_count) ||
-      !checked_mul_size(expanded_channels, input_channels,
-                        &expand_weight_count) ||
-      !checked_mul_size(kernel_height, kernel_width, &tmp) ||
-      !checked_mul_size(tmp, expanded_channels, &depthwise_weight_count) ||
-      !checked_mul_size(output_channels, expanded_channels,
-                        &project_weight_count) ||
-      !checked_mul_size(kernel_height, input_width, &tmp) ||
-      !checked_mul_size(tmp, expanded_channels, &cache_bytes) ||
-      !checked_mul_size(output_width, expanded_channels, &depth_row_bytes) ||
-      !checked_mul_size(output_width, output_channels, &delay_row_bytes) ||
-      !checked_mul_size(expanded_channels, sizeof(int32_t),
-                        &expanded_i32_bytes) ||
-      !checked_mul_size(output_channels, sizeof(int32_t),
-                        &output_i32_bytes)) {
-    return;
-  }
-  if ((flags & VMCU_FLAG_IN_PLACE) != 0) {
-    if (!checked_mul_size(delay_rows, delay_row_bytes, &delay_bytes)) {
-      return;
-    }
-  }
-  if (!checked_add_size(cache_bytes, depth_row_bytes, &required_scratch) ||
-      !checked_add_size(required_scratch, delay_bytes, &required_scratch) ||
-      required_scratch > (size_t)INT32_MAX ||
-      (size_t)config[35] < required_scratch) {
-    return;
-  }
-
-  if (input_offset > SIZE_MAX - input_count ||
-      output_offset > SIZE_MAX - output_count ||
-      w_expand_offset > SIZE_MAX - expand_weight_count ||
-      w_depthwise_offset > SIZE_MAX - depthwise_weight_count ||
-      w_project_offset > SIZE_MAX - project_weight_count ||
-      scratch_offset > SIZE_MAX - required_scratch ||
-      b_expand_offset > SIZE_MAX - expanded_i32_bytes ||
-      b_depthwise_offset > SIZE_MAX - expanded_i32_bytes ||
-      b_project_offset > SIZE_MAX - output_i32_bytes ||
-      m_expand_offset > SIZE_MAX - expanded_i32_bytes ||
-      m_depthwise_offset > SIZE_MAX - expanded_i32_bytes ||
-      m_project_offset > SIZE_MAX - output_i32_bytes ||
-      s_expand_offset > SIZE_MAX - expanded_channels ||
-      s_depthwise_offset > SIZE_MAX - expanded_channels ||
-      s_project_offset > SIZE_MAX - output_channels ||
-      config_offset > SIZE_MAX - 37U) {
-    return;
-  }
+  cache_bytes = kernel_height * input_width * expanded_channels;
+  depth_row_bytes = output_width * expanded_channels;
+  delay_row_bytes = output_width * output_channels;
 
   alias = input == output;
-  if (alias && ((flags & VMCU_FLAG_IN_PLACE) == 0 ||
-                output_height != input_height ||
-                output_width != input_width ||
-                output_channels != input_channels)) {
-    return;
-  }
-  for (n = 0U; n < expanded_channels; ++n) {
-    if (!valid_shift(s_expand[n]) || !valid_shift(s_depthwise[n])) {
-      return;
-    }
-  }
-  for (n = 0U; n < output_channels; ++n) {
-    if (!valid_shift(s_project[n])) {
-      return;
-    }
-  }
-
   for (n = 0U; n < batches; ++n) {
     int8_t *const expansion_cache = scratch;
     int8_t *const depthwise_row = scratch + cache_bytes;
@@ -456,12 +332,7 @@ static void oneliner_vmcu_ibn_kernel(
       CONST_TENSOR(int8_t, s_project_base, s_project_offset),                  \
       CONST_TENSOR(int32_t, config_base, config_offset),                       \
       TENSOR(int8_t, output_base, output_offset),                              \
-      TENSOR(int8_t, scratch_base, scratch_offset), input_offset,              \
-      w_expand_offset, w_depthwise_offset, w_project_offset, b_expand_offset,  \
-      b_depthwise_offset, b_project_offset, m_expand_offset,                   \
-      m_depthwise_offset, m_project_offset, s_expand_offset,                   \
-      s_depthwise_offset, s_project_offset, config_offset, output_offset,      \
-      scratch_offset)
+      TENSOR(int8_t, scratch_base, scratch_offset))
 
 #define VMCU_IBN_BASES_VALID                                                   \
   (input_base != NULL && w_expand_base != NULL &&                              \

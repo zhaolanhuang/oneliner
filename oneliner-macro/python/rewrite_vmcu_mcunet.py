@@ -192,6 +192,20 @@ def require_scalar(value: ir.Value, label: str) -> int:
     return result
 
 
+def require_shift(value: ir.Value, label: str) -> int:
+    result = require_scalar(value, label)
+    if result < 1 or result > 62:
+        raise ValueError(f"{label} must be in [1, 62]")
+    return result
+
+
+def require_zero_point(value: ir.Value, label: str) -> int:
+    result = require_scalar(value, label)
+    if result < -128 or result > 127:
+        raise ValueError(f"{label} must be in [-128, 127]")
+    return result
+
+
 def require_constant_tensor(value: ir.Value, element_type: str, shape: tuple[int, ...], label: str) -> None:
     owner = owner_operation(value)
     if owner is None or owner.name != "arith.constant" or tensor_shape(value, element_type, len(shape)) != shape:
@@ -295,6 +309,14 @@ def validate_rescale(candidate: ir.Operation, channels: int, label: str, rank: i
     multiplier, shift = inputs[1], inputs[2]
     require_constant_tensor(multiplier, "i32", (channels,), f"{label} multiplier")
     require_constant_tensor(shift, "i8", (channels,), f"{label} shift")
+    multiplier_values = dense_ints(owner_operation(multiplier).attributes["value"])
+    shift_values = dense_ints(owner_operation(shift).attributes["value"])
+    for value in multiplier_values:
+        if value < 0 or value >= (1 << 31):
+            raise ValueError(f"{label} multiplier must be in [0, 2^31)")
+    for value in shift_values:
+        if value < 1 or value > 62:
+            raise ValueError(f"{label} shift must be in [1, 62]")
     dimensions = len(candidate.opview.iterator_types)
     if dimensions == 2:
         results = ((0, 1), (1,), (1,), (0, 1))
@@ -337,7 +359,7 @@ def validate_rescale(candidate: ir.Operation, channels: int, label: str, rank: i
         addition = operations[1]
         if addition.operands[0] != cursor:
             raise ValueError(f"{label} rescale has modified scalar dataflow")
-        output_zp = require_scalar(addition.operands[1], f"{label} output zero point")
+        output_zp = require_zero_point(addition.operands[1], f"{label} output zero point")
         cursor = addition.results[0]
         offset = 2
     lower, upper, truncation, yield_operation = operations[offset:]
@@ -397,7 +419,7 @@ def validate_folded_rescale(candidate: ir.Operation, channels: int, label: str, 
         addition = operations[8]
         if addition.operands[0] != cursor:
             raise ValueError(f"{label} folded rescale has modified scalar dataflow")
-        output_zp = require_scalar(addition.operands[1], f"{label} output zero point")
+        output_zp = require_zero_point(addition.operands[1], f"{label} output zero point")
         cursor = addition.results[0]
         offset = 9
     lower, upper, truncation, yield_operation = operations[offset:]
@@ -488,7 +510,7 @@ def validate_arith_rescale(operations: list[ir.Operation], scalar_block, label: 
         addition = operations[15]
         if addition.operands[0] != cursor:
             raise ValueError(f"{label} rescale has modified scalar dataflow")
-        output_zp = require_scalar(addition.operands[1], f"{label} output zero point")
+        output_zp = require_zero_point(addition.operands[1], f"{label} output zero point")
         cursor = addition.results[0]
         offset = 16
     lower, upper, truncation, yield_operation = operations[offset:]
@@ -550,7 +572,7 @@ def match_pointwise(contraction: ir.Operation, label: str, rank: int = 4) -> Sta
         rescale=rescale,
         multiplier=multiplier,
         shift=shift,
-        input_zp=require_scalar(contraction.operands[2], f"{label} input zero point"),
+        input_zp=require_zero_point(contraction.operands[2], f"{label} input zero point"),
         output_zp=output_zp,
         operations={collapse, transpose, bias_init, contraction, expand, rescale},
         rank=rank,
@@ -590,7 +612,7 @@ def parse_scale_pair(candidate: ir.Operation, rounding: str, label: str) -> tupl
         or yield_operation.operands[0] != scale.results[0]
     ):
         raise ValueError(f"{label} has modified scalar semantics")
-    return require_scalar(scale.operands[1], f"{label} multiplier"), require_scalar(scale.operands[2], f"{label} shift")
+    return require_scalar(scale.operands[1], f"{label} multiplier"), require_shift(scale.operands[2], f"{label} shift")
 
 
 def parse_single_branch(candidate: ir.Operation, source: ir.Value, zero_point: int, label: str) -> tuple[int, int]:
@@ -610,7 +632,7 @@ def parse_single_branch(candidate: ir.Operation, source: ir.Value, zero_point: i
         or yield_operation.operands[0] != scale.results[0]
     ):
         raise ValueError(f"{label} has modified scalar semantics")
-    return require_scalar(scale.operands[1], f"{label} multiplier"), require_scalar(scale.operands[2], f"{label} shift")
+    return require_scalar(scale.operands[1], f"{label} multiplier"), require_shift(scale.operands[2], f"{label} shift")
 
 
 def parse_final_residual(candidate: ir.Operation, source: ir.Value) -> tuple[int, int, int]:
@@ -630,7 +652,7 @@ def parse_final_residual(candidate: ir.Operation, source: ir.Value) -> tuple[int
     if scale.operands[0] != scalar_block.arguments[0] or scale.attributes.get("rounding_mode") != double_round:
         raise ValueError("residual final rescale has modified scalar semantics")
     multiplier = require_scalar(scale.operands[1], "residual final multiplier")
-    shift = require_scalar(scale.operands[2], "residual final shift")
+    shift = require_shift(scale.operands[2], "residual final shift")
     cursor = scale.results[0]
     output_zp = 0
     offset = 1
@@ -638,7 +660,7 @@ def parse_final_residual(candidate: ir.Operation, source: ir.Value) -> tuple[int
         addition = operations[1]
         if addition.operands[0] != cursor:
             raise ValueError("residual final rescale has modified scalar dataflow")
-        output_zp = require_scalar(addition.operands[1], "residual final output zero point")
+        output_zp = require_zero_point(addition.operands[1], "residual final output zero point")
         cursor = addition.results[0]
         offset = 2
     lower, upper, truncation, yield_operation = operations[offset:]
@@ -718,7 +740,7 @@ def match_conv(candidate: ir.Operation, label: str) -> ConvStage:
         raise ValueError(f"{label} conv has modified operands")
     if scalar_integer(candidate.operands[3]) != 0:
         raise ValueError(f"{label} weight zero point must be zero")
-    input_zp = require_scalar(candidate.operands[2], f"{label} input zero point")
+    input_zp = require_zero_point(candidate.operands[2], f"{label} input zero point")
     pad = owner_operation(candidate.operands[0])
     input_value = candidate.operands[0]
     if pad is not None and pad.name == "tensor.pad":
@@ -861,7 +883,7 @@ def match_ib_block(dw: ir.Operation, expansion_op: ir.Operation, projection_op: 
     validate_fill(fill, f"block {number} depthwise accumulator")
     if len(dw.operands) != 5 or scalar_integer(dw.operands[3]) != 0:
         raise ValueError(f"block {number} depthwise contraction has modified zero points")
-    depthwise_input_zp = require_scalar(dw.operands[2], f"block {number} depthwise input zero point")
+    depthwise_input_zp = require_zero_point(dw.operands[2], f"block {number} depthwise input zero point")
     if depthwise_input_zp != expansion.output_zp:
         raise ValueError(f"block {number} expansion/depthwise zero points are inconsistent")
     weight_shape = tensor_shape(dw.operands[1], "i8", 4)
@@ -974,7 +996,7 @@ def match_ib_block(dw: ir.Operation, expansion_op: ir.Operation, projection_op: 
 def match_depthwise_standalone(dw: ir.Operation, dw_collapse: ir.Operation, bias_add: ir.Operation, rescale: ir.Operation) -> ConvStage:
     if len(dw.operands) != 5 or len(dw.results) != 1 or scalar_integer(dw.operands[3]) != 0:
         raise ValueError("depthwise contraction has modified zero points")
-    input_zp = require_scalar(dw.operands[2], "depthwise input zero point")
+    input_zp = require_zero_point(dw.operands[2], "depthwise input zero point")
     pad = owner_operation(dw.operands[0])
     input_value = dw.operands[0]
     if pad is not None and pad.name == "tensor.pad":

@@ -32,9 +32,7 @@ void oneliner_vmcu_pointwise_pair_s8(
   size_t row;
 
   if (input == NULL || weight0 == NULL || weight1 == NULL || config == NULL ||
-      output == NULL || segment == NULL || rows == 0U ||
-      input_channels == 0U || intermediate_channels == 0U ||
-      output_channels == 0U) {
+      output == NULL || segment == NULL) {
     return;
   }
 

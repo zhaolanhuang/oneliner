@@ -15,6 +15,7 @@ All latency numbers are QEMU guest SysTick counts over 30 iterations
 | opt4 | word-wise row copies (aligned fast path) | 723,345 | **-12%** | kept, committed |
 | opt5 | padded cache, branch-free depthwise MAC | 845,859 | +17% | regressed, reverted |
 | opt6 | ring rotation modulo -> conditional subtract | 738,025 | -2% | kept, committed |
+| opt7 | remove runtime config validation (rewriter guarantees) | 576,500 | **-22%** | kept (pending commit) |
 
 ## Final numbers
 
@@ -23,21 +24,25 @@ All latency numbers are QEMU guest SysTick counts over 30 iterations
 | --- | --- | --- | --- |
 | Flash total | 552,328 B | 430,156 B | -22% |
 | RAM arena | 119,552 B | 34,880 B | -71% |
-| Latency best | ~823,182 | ~738,025 | **-10%** |
-| Latency avg | ~871,044 | ~756,968 | **-13%** |
+| Latency best | ~821,576 | ~576,500 | **-30%** |
+| Latency avg | ~867,147 | ~593,551 | **-32%** |
 
 ### Cortex-M7 (mps2-an500), MCUNet
 | | standard | vMCU auto | delta |
 | --- | --- | --- | --- |
-| Latency best | 829,488 | 748,877 | **-10%** |
+| Latency best | 827,400 | 568,012 | **-31%** |
 
 ### Cortex-M4, LeNet5 (small model, ukernel overhead dominant)
 | | standard | vMCU auto |
 | --- | --- | --- |
-| Latency best | 36,758 | 82,130 (+2.2x) |
+| Latency best | 36,429 | 28,289 (**-22%**) |
 
 ## Findings
 
+1. Runtime config validation was a major per-call cost (per-channel shift
+   loops, geometry recomputation, checked arithmetic). With validation moved
+   to the rewriter (compile time), latency dropped another 22% on MCUNet and
+   68% on LeNet5; the kernels keep only null/alignment guards.
 1. The dominant cost was the runtime ring-cache modulo: each (row, tap)
    computed `(ring_start + ky) % kernel_height` as udiv+mls (hardware
    division, no compiler folding for runtime divisors). Removing it cut

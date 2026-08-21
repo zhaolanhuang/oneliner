@@ -419,6 +419,36 @@ class VmcuGenericRewriteTests(unittest.TestCase):
         self.assertEqual(rewritten.count(REWRITER.FC_KERNEL_NAME), 1)
         self.assertEqual(rewritten.count(REWRITER.GENERIC_BITCODE_PATH), 2)
 
+    def test_rejects_out_of_range_shift_at_compile_time(self):
+        source = synthetic_mixed_model().replace(
+            "dense<[30, 31, 32]> : tensor<3xi8>",
+            "dense<[30, 31, 0]> : tensor<3xi8>",
+        )
+        context = REWRITER.ir.Context()
+        module = REWRITER.ir.Module.parse(source, context=context)
+        direct = REWRITER.direct_operations([f for f in REWRITER.operations_named(module, "util.func")][0])
+        conv = [candidate for candidate in direct if candidate.name == REWRITER.CONV][0]
+        with self.assertRaisesRegex(ValueError, "shift must be in \[1, 62\]"):
+            REWRITER.match_conv(conv, "conv2d")
+        self.assertEqual(
+            [module.kind for module in REWRITER.match_generic(source).modules],
+            ["fc"],
+        )
+
+    def test_rejects_out_of_range_zero_point_at_compile_time(self):
+        source = synthetic_mixed_model().replace(
+            "%c2_i32 = arith.constant 2 : i32",
+            "%c2_i32 = arith.constant 200 : i32",
+        )
+        context = REWRITER.ir.Context()
+        module = REWRITER.ir.Module.parse(source, context=context)
+        direct = REWRITER.direct_operations([f for f in REWRITER.operations_named(module, "util.func")][0])
+        conv = [candidate for candidate in direct if candidate.name == REWRITER.CONV][0]
+        with self.assertRaisesRegex(ValueError, "zero point must be in \[-128, 127\]"):
+            REWRITER.match_conv(conv, "conv2d")
+        with self.assertRaisesRegex(ValueError, "no vMCU-compatible subgraphs found"):
+            REWRITER.match_generic(source)
+
     def test_rejects_model_without_any_pattern(self):
         empty = """module { util.func public @main(%arg0: tensor<4xi8>) -> tensor<4xi8> {
   %0 = arith.constant dense<[1, 2, 3, 4]> : tensor<4xi8>
