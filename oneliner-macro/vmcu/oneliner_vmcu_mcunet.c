@@ -351,6 +351,7 @@ static void mcunet_kernel(
       size_t last_new_ky = kernel_height;
       size_t ky;
       size_t ox;
+      size_t ring_index;
       int8_t *projected_row;
 
       if (alias && step >= delay_rows) {
@@ -384,9 +385,13 @@ static void mcunet_kernel(
         const size_t padded_y = oy * stride_height + ky * dilation_height;
         size_t iy;
         size_t ix;
-        int8_t *const cache_row =
-            expansion_cache + ((ring_start + ky) % kernel_height) *
-                                  input_width * expanded_channels;
+        size_t ring_index = ring_start + ky;
+        int8_t *cache_row;
+        if (ring_index >= kernel_height) {
+          ring_index -= kernel_height;
+        }
+        cache_row = expansion_cache + ring_index * input_width *
+                                          expanded_channels;
         if (padded_y < pad_top ||
             (iy = padded_y - pad_top) >= input_height) {
           continue;
@@ -427,9 +432,12 @@ static void mcunet_kernel(
               continue;
             }
             (void)iy;
-            cache_row = expansion_cache +
-                        ((ring_start + ky) % kernel_height) * input_width *
-                            expanded_channels;
+            ring_index = ring_start + ky;
+            if (ring_index >= kernel_height) {
+              ring_index -= kernel_height;
+            }
+            cache_row = expansion_cache + ring_index * input_width *
+                                              expanded_channels;
             for (kx = 0U; kx < kernel_width; ++kx) {
               const size_t padded_x =
                   ox * stride_width + kx * dilation_width;

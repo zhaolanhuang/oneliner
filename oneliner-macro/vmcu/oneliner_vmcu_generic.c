@@ -172,6 +172,7 @@ static int conv2d_kernel(const int8_t *input, const int8_t *weight,
       size_t last_new_ky = kernel_height;
       size_t ky;
       size_t ox;
+      size_t ring_index;
 
       if (oy != 0U && stride_height % dilation_height == 0U) {
         const size_t rotation = stride_height / dilation_height;
@@ -188,12 +189,15 @@ static int conv2d_kernel(const int8_t *input, const int8_t *weight,
       for (ky = first_new_ky; ky < last_new_ky; ++ky) {
         const size_t padded_y = oy * stride_height + ky * dilation_height;
         size_t iy;
+        size_t ring_index = ring_start + ky;
         if (padded_y < pad_top ||
             (iy = padded_y - pad_top) >= input_height) {
           continue;
         }
-        copy_bytes(cache + ((ring_start + ky) % kernel_height) * input_width *
-                                input_channels,
+        if (ring_index >= kernel_height) {
+          ring_index -= kernel_height;
+        }
+        copy_bytes(cache + ring_index * input_width * input_channels,
                    batch_input + iy * input_width * input_channels,
                    input_width * input_channels);
       }
@@ -212,9 +216,11 @@ static int conv2d_kernel(const int8_t *input, const int8_t *weight,
               continue;
             }
             (void)iy;
-            cache_row =
-                cache + ((ring_start + ky) % kernel_height) * input_width *
-                            input_channels;
+            ring_index = ring_start + ky;
+            if (ring_index >= kernel_height) {
+              ring_index -= kernel_height;
+            }
+            cache_row = cache + ring_index * input_width * input_channels;
             for (kx = 0U; kx < kernel_width; ++kx) {
               const size_t padded_x = ox * stride_width + kx * dilation_width;
               size_t ix;

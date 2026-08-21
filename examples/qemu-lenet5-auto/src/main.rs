@@ -3,6 +3,7 @@
 
 use core::panic::PanicInfo;
 
+use cortex_m::peripheral::syst::SystClkSource;
 use cortex_m_rt::entry;
 use cortex_m_semihosting::{
     debug::{self, EXIT_FAILURE, EXIT_SUCCESS},
@@ -21,6 +22,7 @@ struct Model;
 struct Model;
 
 const OUTPUT_LEN: usize = 10;
+const ITERATIONS: u32 = 30;
 const EXPECTED: [f32; OUTPUT_LEN] = [
     0.11666615, 0.11666615, 0.13124943, 0.68541366, 0.0, 0.36458173, 0.0, 0.0, 1.2104113,
     0.16041596,
@@ -40,9 +42,45 @@ fn main() -> ! {
         artifacts.output_size
     );
 
-    let output = Model::new().run(INPUT.take());
-    let actual = output.as_slice();
+    let mut peripherals = cortex_m::Peripherals::take().unwrap();
+    let syst = &mut peripherals.SYST;
+    syst.set_clock_source(SystClkSource::Core);
+    syst.set_reload(0x00FF_FFFF);
+    syst.clear_current();
+    syst.enable_counter();
+
+    let mut best = u32::MAX;
+    let mut total = 0u64;
+    let mut valid = 0u32;
+    let mut output = None;
+    for iteration in 0..ITERATIONS {
+        let input = <Model as ModelInference>::InputTensor::new(7.0);
+        let start = cortex_m::peripheral::SYST::get_current();
+        let result = Model::new().run(&input);
+        let end = cortex_m::peripheral::SYST::get_current();
+        output = Some(result);
+        if end > start {
+            continue;
+        }
+        let ticks = start - end;
+        best = best.min(ticks);
+        total += u64::from(ticks);
+        valid += 1;
+        let _ = hprintln!("iter {}: {} ticks", iteration, ticks);
+    }
+    let last_output = output.unwrap();
+    let actual = last_output.as_slice();
     let _ = hprintln!("lenet5 output: {:?}", actual);
+    if valid > 0 {
+        let _ = hprintln!(
+            "latency: best={} ticks avg={} ticks ({} valid iterations)",
+            best,
+            total / u64::from(valid),
+            valid
+        );
+    } else {
+        let _ = hprintln!("latency: all iterations wrapped the 24-bit SysTick counter");
+    }
     if actual == EXPECTED {
         let _ = hprintln!("LeNet5 QEMU validation PASSED");
         debug::exit(EXIT_SUCCESS);

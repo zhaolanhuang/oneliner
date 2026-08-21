@@ -1,0 +1,79 @@
+# vMCU performance report: opt1-inline-scale
+Date: 2026-08-21T19:54:50Z
+Machine: mps2-an386  CPU: cortex-m4
+
+## vMCU auto
+  Flash Usage: params = 397312 B (388 KiB), text(code) = 16116 B (15 KiB), rodata = 16972 B (16 KiB), total = 430400 B (420 KiB)
+  RAM Usage: arena = 34880 B (34 KiB), input = 12288 B (12 KiB), output = 2 B (0 KiB)
+  vMCU auto: intermediate = 49152 B, segment = 8448 B, logical saving = 40704 B
+auto: vmcu=true arena=34880 input=12288 output=2
+iter 0: 1317183 ticks
+iter 1: 1081948 ticks
+iter 2: 1099377 ticks
+iter 3: 1087040 ticks
+iter 4: 1106005 ticks
+iter 5: 1079877 ticks
+iter 6: 1110311 ticks
+iter 7: 1115297 ticks
+iter 8: 1109797 ticks
+iter 9: 1113230 ticks
+iter 10: 1089991 ticks
+iter 11: 1105484 ticks
+iter 12: 1106786 ticks
+iter 13: 1111925 ticks
+iter 14: 1117670 ticks
+iter 16: 1095771 ticks
+iter 17: 1106155 ticks
+iter 18: 1099463 ticks
+iter 19: 1104739 ticks
+iter 20: 1095728 ticks
+iter 21: 1086814 ticks
+iter 22: 1104019 ticks
+iter 23: 1098226 ticks
+iter 24: 1106836 ticks
+iter 25: 1097193 ticks
+iter 26: 1100591 ticks
+iter 27: 1110226 ticks
+iter 28: 1081733 ticks
+iter 29: 1086154 ticks
+mcunet output: [4, -5]
+latency: best=1079877 ticks avg=1107778 ticks (29 valid iterations)
+MCUNet QEMU validation PASSED
+
+## Standard
+  Flash Usage: params = 416320 B (406 KiB), text(code) = 114460 B (111 KiB), rodata = 21548 B (21 KiB), total = 552328 B (539 KiB)
+  RAM Usage: arena = 119552 B (116 KiB), input = 12288 B (12 KiB), output = 2 B (0 KiB)
+auto: vmcu=false arena=119552 input=12288 output=2
+iter 0: 1933837 ticks
+iter 1: 845130 ticks
+iter 2: 836719 ticks
+iter 3: 830003 ticks
+iter 4: 828450 ticks
+iter 5: 837590 ticks
+iter 6: 839515 ticks
+iter 7: 834117 ticks
+iter 8: 827792 ticks
+iter 9: 827363 ticks
+iter 10: 824384 ticks
+iter 11: 822714 ticks
+iter 12: 830735 ticks
+iter 13: 827792 ticks
+iter 14: 820132 ticks
+iter 15: 830250 ticks
+iter 16: 829442 ticks
+iter 17: 831501 ticks
+iter 19: 831165 ticks
+iter 20: 833353 ticks
+iter 21: 836594 ticks
+iter 22: 831277 ticks
+iter 23: 832707 ticks
+iter 24: 835464 ticks
+iter 25: 833317 ticks
+iter 26: 826495 ticks
+iter 27: 834386 ticks
+iter 28: 839507 ticks
+iter 29: 832513 ticks
+mcunet output: [4, -5]
+latency: best=820132 ticks avg=869801 ticks (29 valid iterations)
+MCUNet QEMU validation PASSED
+
