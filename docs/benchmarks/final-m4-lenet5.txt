@@ -1,0 +1,17 @@
+# vMCU performance report: final-m4-lenet5
+Date: 2026-08-21T20:23:54Z
+Machine: mps2-an386  CPU: cortex-m4  Model: LeNet5 (float I/O, int8 subgraphs)
+
+## vMCU auto
+  Flash Usage: params = 45248 B (44 KiB), text(code) = 8836 B (8 KiB), rodata = 5293 B (5 KiB), total = 59377 B (57 KiB)
+  RAM Usage: arena = 5184 B (5 KiB), input = 3136 B (3 KiB), output = 40 B (0 KiB)
+auto: vmcu=true arena=5184 input=3136 output=40
+latency: best=87439 ticks avg=97910 ticks (30 valid iterations)
+LeNet5 QEMU validation PASSED
+
+## Standard
+  Flash Usage: params = 46336 B (45 KiB), text(code) = 10600 B (10 KiB), rodata = 3362 B (3 KiB), total = 60298 B (58 KiB)
+  RAM Usage: arena = 5184 B (5 KiB), input = 3136 B (3 KiB), output = 40 B (0 KiB)
+auto: vmcu=false arena=5184 input=3136 output=40
+latency: best=36429 ticks avg=42562 ticks (30 valid iterations)
+LeNet5 QEMU validation PASSED
