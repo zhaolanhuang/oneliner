@@ -52,3 +52,32 @@ Even with the stack counted, vMCU peak RAM is 82 KB vs 158 KB standard
 (-48%). The ukernel scratch is placed on the dispatch stack by IREE's
 bufferization; moving it into the arena (or lowering the dispatch stack
 limit) is a further tuning lever.
+
+## Static stack budget (frame audit of both binaries)
+
+vMCU binary frames (all `sub sp, sp, #N` >= 512):
+
+   37,228  main (run() inlined; includes the 12,288 B input local
+             and the timing/printing machinery)
+    8,832  main_dispatch_5_custom_op_4608xi8   (ukernel dispatch)
+    8,576  main_dispatch_4_custom_op_8448xi8   (ukernel dispatch)
+    7,328  main_dispatch_14_custom_op_96x240xi8
+    6,880  main_dispatch_15_custom_op_480x96xi8
+    6,304  main_dispatch_16_custom_op_160x384xi8
+    5,280  main_dispatch_11_custom_op_7x7x120x1xi8
+    5,152  main_dispatch_7/8_custom_op_3456xi8
+    4,640  main_dispatch_6_custom_op_4480xi8
+    4,384  main_dispatch_13_custom_op_192x48xi8
+    3,680  main_dispatch_10_custom_op_160x40xi8
+      624  main_dispatch_0_custom_op_1x32x32x16xi8
+      516  oneliner_vmcu_ibn_s8 (ukernel wrapper; conv2d/fc <= same)
+
+The ukernel wrappers hold the scratch/segment and non-in-place output
+buffers on their dispatch frames. Worst-case single path:
+main 37,228 + deepest dispatch 8,832 + ukernel 516 + padding ~ 46.6 KB,
+matching the measured 47,272 B high-water.
+
+Standard binary: only main has a frame >= 512 (37,120); all dispatchers
+use the arena and keep small frames, so the static worst case is ~38.4 KB
+(matching the measured 38,368 B). The stack region (RAM top, 512 KiB
+linker grant) is far from exhausted in either mode.
