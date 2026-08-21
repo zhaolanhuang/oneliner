@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use proc_macro2::TokenStream;
 use syn::Ident;
 
-use crate::args::ArenaArg;
+use crate::args::{ArenaArg, VmcuArg};
 use crate::frontend::{Model, TensorInfo};
 
 #[derive(Debug)]
@@ -42,14 +42,23 @@ struct IreeArtifacts {
     code_size: usize,
     rodata_size: usize,
     ram_size: usize,
+    vmcu_plan: Option<VmcuPlanArtifact>,
+}
+
+#[derive(Debug, Clone)]
+struct VmcuPlanArtifact {
+    full_intermediate_bytes: usize,
+    segment_bytes: usize,
+    saved_intermediate_bytes: usize,
 }
 
 pub fn expand(
     input_struct: syn::ItemStruct,
     model: Model,
     arena: ArenaArg,
+    vmcu: Option<VmcuArg>,
 ) -> syn::Result<TokenStream> {
-    let artifacts = artifacts::build(&input_struct.ident, model)?;
+    let artifacts = artifacts::build(&input_struct.ident, model, vmcu)?;
 
     let params_size = artifacts.params_size;
     let code_size = artifacts.code_size;
@@ -59,7 +68,10 @@ pub fn expand(
     let input_size = artifacts.input.size;
     let output_size = artifacts.output.size;
 
-    eprintln!("[oneliner-profiler] {} memory footprint:", input_struct.ident);
+    eprintln!(
+        "[oneliner-profiler] {} memory footprint:",
+        input_struct.ident
+    );
     eprintln!(
         "  Flash Usage: params = {} B ({} KiB), text(code) = {} B ({} KiB), rodata = {} B ({} KiB), total = {} B ({} KiB)",
         params_size,
@@ -80,6 +92,12 @@ pub fn expand(
         output_size,
         output_size / 1024,
     );
+    if let Some(plan) = &artifacts.vmcu_plan {
+        eprintln!(
+            "  vMCU pointwise-pair: intermediate = {} B, segment = {} B, logical saving = {} B",
+            plan.full_intermediate_bytes, plan.segment_bytes, plan.saved_intermediate_bytes,
+        );
+    }
 
     let expanded = codegen::expand(input_struct, artifacts, arena);
     // eprintln!("generated:\n{expanded}");

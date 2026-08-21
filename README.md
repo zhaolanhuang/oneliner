@@ -75,8 +75,11 @@ struct MyModel;
 | `backend` | `"iree"` | `"iree"` | Execution backend. Only IREE is currently available. |
 | `arena` | `"owned"`, `"shared"` | `"owned"` | Workspace memory mode, see [Memory model](docs/memory_model.md). |
 | `format` | `"mlir"`, `"onnx"`, `"pytorch"`/`"pt2"`, `"tensorflow"`/`"tf"`, `"tflite"` | auto-detected from the file extension | Explicit model format override. Required for TensorFlow SavedModel v2 directories (no extension). |
+| `vmcu` | `"pointwise-pair"` | disabled | Experimental Cortex-M4 lowering for one static int8 pointwise pair using a row-sized intermediate segment. |
 
 The format is normally inferred from the extension (`.mlir`, `.onnx`, `.pt2`, `.tflite`); pass `format` explicitly to override it, which is mandatory for TensorFlow SavedModel directories. Duplicate or unknown options are rejected at compile time.
+
+The experimental vMCU plan reports logical intermediate and segment bytes. Dispatch-local stack allocation and alignment are not included in the generated model's arena size; measure total stack usage on the target before drawing peak-RAM conclusions.
 
 ## Profiling
 
@@ -93,6 +96,7 @@ Each example is an independent Cargo project. Run its commands from the example 
 | [Embassy on Rasperry Pi Pico](examples/embassy-pico-minimal/) | Bare-metal RP2040, static input storage| Quantized LeNet5 |
 | [Ariel OS + Profiler](examples/ariel-os-profiler/) | `no_std` latency profiling with `Profiler` | Quantized LeNet5 and MCUNet |
 | [Embassy on Rasperry Pi Pico + Profiler](examples/embassy-pico-profiler/) | Bare-metal RP2040 latency profiling | Quantized LeNet5 |
+| [vMCU pointwise pair on QEMU](examples/qemu-vmcu-pointwise/) | Experimental segment-buffer ukernel on an emulated Cortex-M4 | Two int8 pointwise layers |
 
 Start with the [desktop example](examples/std-minimal/) to confirm the model toolchain, then move to the operating system or board example that matches your target.
 

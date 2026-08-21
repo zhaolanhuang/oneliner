@@ -6,6 +6,7 @@ pub struct ModelArgs {
     pub backend: BackendArg,
     pub arena: ArenaArg,
     pub format: Option<ModelFormat>,
+    pub vmcu: Option<VmcuArg>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +21,11 @@ pub enum ArenaArg {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VmcuArg {
+    PointwisePair,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelFormat {
     Mlir,
     Onnx,
@@ -29,7 +35,7 @@ pub enum ModelFormat {
 }
 
 impl ModelArgs {
-    /// Parses `#[model("path", backend = "...", arena = "...", ...)]` arguments.
+    /// Parses `#[model("path", backend = "...", arena = "...", vmcu = "...", ...)]` arguments.
     ///
     /// Input: `syn::AttributeArgs` from the procedural macro entry point.
     /// Output: model path literal, backend selector, and backend options.
@@ -49,6 +55,7 @@ impl ModelArgs {
         let mut backend = None;
         let mut arena = None;
         let mut format = None;
+        let mut vmcu = None;
         for arg in args {
             match arg {
                 NestedMeta::Meta(Meta::NameValue(meta)) if meta.path.is_ident("backend") => {
@@ -69,10 +76,16 @@ impl ModelArgs {
                     }
                     format = Some(parse_format(meta.lit)?);
                 }
+                NestedMeta::Meta(Meta::NameValue(meta)) if meta.path.is_ident("vmcu") => {
+                    if vmcu.is_some() {
+                        return Err(syn::Error::new(meta.span(), "duplicate vmcu option"));
+                    }
+                    vmcu = Some(parse_vmcu(meta.lit)?);
+                }
                 other => {
                     return Err(syn::Error::new(
                         other.span(),
-                        "unknown #[model] option; expected backend, arena, or format",
+                        "unknown #[model] option; expected backend, arena, format, or vmcu",
                     ));
                 }
             }
@@ -83,7 +96,25 @@ impl ModelArgs {
             backend: backend.unwrap_or(BackendArg::Iree),
             arena: arena.unwrap_or(ArenaArg::Owned),
             format,
+            vmcu,
         })
+    }
+}
+
+fn parse_vmcu(lit: Lit) -> syn::Result<VmcuArg> {
+    let Lit::Str(value) = lit else {
+        return Err(syn::Error::new(
+            lit.span(),
+            "vmcu must be a string literal, for example vmcu = \"pointwise-pair\"",
+        ));
+    };
+
+    match value.value().as_str() {
+        "pointwise-pair" => Ok(VmcuArg::PointwisePair),
+        other => Err(syn::Error::new(
+            value.span(),
+            format!("unknown vmcu mode '{other}', expected 'pointwise-pair'"),
+        )),
     }
 }
 
@@ -185,5 +216,68 @@ mod tests {
 
         let args = ModelArgs::parse(args).unwrap();
         assert_eq!(args.format, Some(ModelFormat::Tensorflow));
+    }
+
+    #[test]
+    fn vmcu_defaults_to_disabled() {
+        let args: AttributeArgs = vec![syn::parse_quote!("model.tflite")];
+
+        let args = ModelArgs::parse(args).unwrap();
+        assert_eq!(args.vmcu, None);
+    }
+
+    #[test]
+    fn parses_pointwise_pair_vmcu() {
+        let args: AttributeArgs = vec![
+            syn::parse_quote!("model.tflite"),
+            syn::parse_quote!(vmcu = "pointwise-pair"),
+        ];
+
+        let args = ModelArgs::parse(args).unwrap();
+        assert_eq!(args.vmcu, Some(VmcuArg::PointwisePair));
+    }
+
+    #[test]
+    fn rejects_duplicate_vmcu_options() {
+        let args: AttributeArgs = vec![
+            syn::parse_quote!("model.tflite"),
+            syn::parse_quote!(vmcu = "pointwise-pair"),
+            syn::parse_quote!(vmcu = "pointwise-pair"),
+        ];
+
+        let error = ModelArgs::parse(args)
+            .err()
+            .expect("duplicate vmcu rejected");
+        assert_eq!(error.to_string(), "duplicate vmcu option");
+    }
+
+    #[test]
+    fn rejects_non_string_vmcu() {
+        let args: AttributeArgs = vec![
+            syn::parse_quote!("model.tflite"),
+            syn::parse_quote!(vmcu = true),
+        ];
+
+        let error = ModelArgs::parse(args)
+            .err()
+            .expect("non-string vmcu rejected");
+        assert_eq!(
+            error.to_string(),
+            "vmcu must be a string literal, for example vmcu = \"pointwise-pair\""
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_vmcu_mode() {
+        let args: AttributeArgs = vec![
+            syn::parse_quote!("model.tflite"),
+            syn::parse_quote!(vmcu = "unsupported"),
+        ];
+
+        let error = ModelArgs::parse(args).err().expect("unknown vmcu rejected");
+        assert_eq!(
+            error.to_string(),
+            "unknown vmcu mode 'unsupported', expected 'pointwise-pair'"
+        );
     }
 }

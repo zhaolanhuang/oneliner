@@ -6,6 +6,9 @@ Oneliner compiles models on your host machine during `cargo build`, so you need 
 
 - Python 3.12 or newer
 - MSRV: 1.95
+- Clang with Cortex-M4 support for the experimental `vmcu = "pointwise-pair"` lowering
+
+The vMCU lowering uses `clang` from `PATH` by default. Set `CLANG` to an explicit compiler path when needed; its LLVM bitcode must be compatible with the installed IREE compiler.
 
 ## Install the compiler packages
 
@@ -48,6 +51,7 @@ iree-compile --version
 tosa-converter-for-tflite --version
 iree-import-onnx --help
 iree-import-tf --help
+clang --version
 python -c "import torch, iree.turbine.aot"
 python -c "import tensorflow"
 ```

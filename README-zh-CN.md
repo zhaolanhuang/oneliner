@@ -76,8 +76,11 @@ struct MyModel;
 | `backend` | `"iree"` | `"iree"` | 执行后端，目前仅支持 IREE。 |
 | `arena` | `"owned"`、`"shared"` | `"owned"` | 工作区内存模式，详见[内存模型](docs/memory_model.md)。 |
 | `format` | `"mlir"`、`"onnx"`、`"pytorch"`/`"pt2"`、`"tensorflow"`/`"tf"`、`"tflite"` | 按文件扩展名自动推断 | 显式指定模型格式。TensorFlow SavedModel v2 目录（无扩展名）必须显式指定。 |
+| `vmcu` | `"pointwise-pair"` | 禁用 | 实验性 Cortex-M4 lowering：用一个行大小的中间 segment 融合一对静态 int8 pointwise 层。 |
 
 格式通常按扩展名（`.mlir`、`.onnx`、`.pt2`、`.tflite`）自动推断；需要覆盖时用 `format` 显式指定，TensorFlow SavedModel 目录必须指定。重复或未知选项会在编译期报错。
+
+实验性 vMCU plan 报告的是中间张量和 segment 的逻辑字节数。生成模型的 arena 大小不包含 dispatch-local 栈分配及其对齐开销；评估峰值 RAM 前应在目标设备上测量总栈占用。
 
 ## 性能剖析
 
@@ -94,6 +97,7 @@ struct MyModel;
 | [Embassy on Raspberry Pi Pico](examples/embassy-pico-minimal/) | 裸机 RP2040，静态输入存储 | 量化 LeNet5 |
 | [Ariel OS + Profiler](examples/ariel-os-profiler/) | `no_std` 延迟剖析（`Profiler`） | 量化 LeNet5 和 MCUNet |
 | [Embassy on Raspberry Pi Pico + Profiler](examples/embassy-pico-profiler/) | 裸机 RP2040 延迟剖析 | 量化 LeNet5 |
+| [QEMU 上的 vMCU pointwise pair](examples/qemu-vmcu-pointwise/) | 在模拟 Cortex-M4 上验证实验性分段缓冲 ukernel | 两层 int8 pointwise |
 
 建议先运行[桌面示例](examples/std-minimal/)确认模型工具链，再选择与目标环境匹配的操作系统或开发板示例。
 

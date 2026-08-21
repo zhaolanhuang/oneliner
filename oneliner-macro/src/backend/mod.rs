@@ -3,7 +3,7 @@ mod llvm_target_info;
 
 use syn::ItemStruct;
 
-use crate::args::{ArenaArg, BackendArg};
+use crate::args::{ArenaArg, BackendArg, VmcuArg};
 use crate::frontend::Model;
 
 /// Delegates a frontend-validated model to the selected backend.
@@ -13,10 +13,11 @@ use crate::frontend::Model;
 pub fn expand(
     backend: BackendArg,
     arena: ArenaArg,
+    vmcu: Option<VmcuArg>,
     input_struct: ItemStruct,
     model: Model,
 ) -> syn::Result<proc_macro2::TokenStream> {
     match backend {
-        BackendArg::Iree => iree::expand(input_struct, model, arena),
+        BackendArg::Iree => iree::expand(input_struct, model, arena, vmcu),
     }
 }

@@ -10,7 +10,8 @@ use syn::{AttributeArgs, ItemStruct, parse_macro_input};
 ///
 /// Input: attribute arguments and the annotated struct item.
 /// Output: generated Rust tokens or `compile_error!` tokens on failure. IREE models
-/// accept `arena = "owned"` (the default) or `arena = "shared"`.
+/// accept `arena = "owned"` (the default) or `arena = "shared"`, and optionally
+/// `vmcu = "pointwise-pair"`.
 #[proc_macro_attribute]
 pub fn model(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr = parse_macro_input!(attr as AttributeArgs);
@@ -18,7 +19,7 @@ pub fn model(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let expanded = args::ModelArgs::parse(attr).and_then(|args| {
         let model = frontend::prepare(&args, &input_struct)?;
-        backend::expand(args.backend, args.arena, input_struct, model)
+        backend::expand(args.backend, args.arena, args.vmcu, input_struct, model)
     });
     match expanded {
         Ok(tokens) => tokens.into(),
