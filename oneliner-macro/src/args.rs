@@ -23,6 +23,8 @@ pub enum ArenaArg {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmcuArg {
     PointwisePair,
+    Mcunet,
+    Auto,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,9 +113,11 @@ fn parse_vmcu(lit: Lit) -> syn::Result<VmcuArg> {
 
     match value.value().as_str() {
         "pointwise-pair" => Ok(VmcuArg::PointwisePair),
+        "mcunet" => Ok(VmcuArg::Mcunet),
+        "auto" => Ok(VmcuArg::Auto),
         other => Err(syn::Error::new(
             value.span(),
-            format!("unknown vmcu mode '{other}', expected 'pointwise-pair'"),
+            format!("unknown vmcu mode '{other}', expected 'pointwise-pair', 'mcunet', or 'auto'"),
         )),
     }
 }
@@ -238,6 +242,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_mcunet_vmcu() {
+        let args: AttributeArgs = vec![
+            syn::parse_quote!("model.mlir"),
+            syn::parse_quote!(vmcu = "mcunet"),
+        ];
+
+        let args = ModelArgs::parse(args).unwrap();
+        assert_eq!(args.vmcu, Some(VmcuArg::Mcunet));
+    }
+
+    #[test]
     fn rejects_duplicate_vmcu_options() {
         let args: AttributeArgs = vec![
             syn::parse_quote!("model.tflite"),
@@ -277,7 +292,7 @@ mod tests {
         let error = ModelArgs::parse(args).err().expect("unknown vmcu rejected");
         assert_eq!(
             error.to_string(),
-            "unknown vmcu mode 'unsupported', expected 'pointwise-pair'"
+            "unknown vmcu mode 'unsupported', expected 'pointwise-pair' or 'mcunet'"
         );
     }
 }

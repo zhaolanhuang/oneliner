@@ -1,0 +1,5 @@
+[target.thumbv7m-none-eabi]
+runner = "qemu-system-arm -cpu cortex-m3 -machine lm3s6965evb -display none -serial none -monitor none -semihosting-config enable=on,target=native -kernel"
+
+[build]
+target = "thumbv7m-none-eabi"

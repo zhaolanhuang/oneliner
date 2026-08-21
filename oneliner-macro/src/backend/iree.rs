@@ -47,6 +47,7 @@ struct IreeArtifacts {
 
 #[derive(Debug, Clone)]
 struct VmcuPlanArtifact {
+    mode: &'static str,
     full_intermediate_bytes: usize,
     segment_bytes: usize,
     saved_intermediate_bytes: usize,
@@ -94,8 +95,11 @@ pub fn expand(
     );
     if let Some(plan) = &artifacts.vmcu_plan {
         eprintln!(
-            "  vMCU pointwise-pair: intermediate = {} B, segment = {} B, logical saving = {} B",
-            plan.full_intermediate_bytes, plan.segment_bytes, plan.saved_intermediate_bytes,
+            "  vMCU {}: intermediate = {} B, segment = {} B, logical saving = {} B",
+            plan.mode,
+            plan.full_intermediate_bytes,
+            plan.segment_bytes,
+            plan.saved_intermediate_bytes,
         );
     }
 

@@ -1,0 +1,21 @@
+[project]
+name = "oneliner"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "iree-base-compiler[onnx]==3.12.0rc20260812",
+    "iree-tools-tf==20250718.1326",
+    "iree-turbine==3.9.0",
+    "tensorflow==2.21.0",
+    "torch==2.13.0",
+    "tosa-converter-for-tflite==2026.2.0",
+]
+
+[project.scripts]
+oneliner = "oneliner:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"

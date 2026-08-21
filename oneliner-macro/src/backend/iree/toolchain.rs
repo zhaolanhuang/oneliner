@@ -37,22 +37,24 @@ pub(super) fn run_iree_compile(
     let target_cpu = target_info.cpu.filter(|value| !value.is_empty());
     let cpu_features = target_info.features.filter(|value| !value.is_empty());
 
-    if let Some(VmcuArg::PointwisePair) = vmcu {
+    if let Some(mode) = vmcu {
         if llvm_triple != "thumbv7em-none-eabi" {
             return Err(syn::Error::new(
                 Span::call_site(),
                 format!(
-                    "vmcu = \"pointwise-pair\" currently requires target thumbv7em-none-eabi, got {rust_target}"
+                    "vmcu lowering currently requires target thumbv7em-none-eabi, got {rust_target}"
                 ),
             ));
         }
-        return run_vmcu_pointwise_compile(
+        return run_vmcu_compile(
             compile_input,
             vmfb,
             object,
             ir_dump_dir,
             &llvm_triple,
+            target_cpu.as_deref(),
             cpu_features.as_deref(),
+            mode,
         );
     }
 
@@ -61,6 +63,7 @@ pub(super) fn run_iree_compile(
         .arg(compile_input)
         .arg("--iree-hal-target-device=local")
         .arg("--iree-hal-local-target-device-backends=llvm-cpu")
+        .arg("--iree-llvmcpu-target-float-abi=soft")
         .arg(format!("--iree-llvmcpu-target-triple={llvm_triple}"));
     if let Some(cpu) = target_cpu {
         command.arg(format!("--iree-llvmcpu-target-cpu={cpu}"));
@@ -116,26 +119,52 @@ fn add_static_link_options(command: &mut Command, object: &Path) {
         ));
 }
 
-fn run_vmcu_pointwise_compile(
+fn run_vmcu_compile(
     compile_input: &Path,
     vmfb: &Path,
     object: &Path,
     ir_dump_dir: &Path,
     llvm_triple: &str,
+    target_cpu: Option<&str>,
     cpu_features: Option<&str>,
+    mode: VmcuArg,
 ) -> syn::Result<()> {
     let artifact_dir = vmfb
         .parent()
         .ok_or_else(|| syn::Error::new(Span::call_site(), "VMFB output has no parent directory"))?;
-    let preprocessing = artifact_dir.join("vmcu-pointwise.preprocessing.mlir");
-    let rewritten = artifact_dir.join("vmcu-pointwise.rewritten.mlir");
-    let configured = artifact_dir.join("vmcu-pointwise.configured.mlir");
-    let lowered = artifact_dir.join("vmcu-pointwise.lowered.mlir");
-    let finalized = artifact_dir.join("vmcu-pointwise.finalized.mlir");
-    let plan = artifact_dir.join("vmcu-pointwise.plan.json");
-    let bitcode = artifact_dir.join("oneliner_vmcu_pointwise.bc");
+    let (stem, rewriter_name, source_name, bitcode_name, generic) = match mode {
+        VmcuArg::PointwisePair => (
+            "vmcu-pointwise",
+            "rewrite_vmcu_pointwise.py",
+            "oneliner_vmcu_pointwise.c",
+            "oneliner_vmcu_pointwise.bc",
+            false,
+        ),
+        VmcuArg::Mcunet => (
+            "vmcu-mcunet",
+            "rewrite_vmcu_mcunet.py",
+            "oneliner_vmcu_mcunet.c",
+            "oneliner_vmcu_mcunet.bc",
+            false,
+        ),
+        VmcuArg::Auto => (
+            "vmcu-generic",
+            "rewrite_vmcu_mcunet.py",
+            "oneliner_vmcu_generic.c",
+            "oneliner_vmcu_generic.bc",
+            true,
+        ),
+    };
+    let cpu = target_cpu.unwrap_or("cortex-m4");
+    let preprocessing = artifact_dir.join(format!("{stem}.preprocessing.mlir"));
+    let rewritten = artifact_dir.join(format!("{stem}.rewritten.mlir"));
+    let configured = artifact_dir.join(format!("{stem}.configured.mlir"));
+    let lowered = artifact_dir.join(format!("{stem}.lowered.mlir"));
+    let finalized = artifact_dir.join(format!("{stem}.finalized.mlir"));
+    let plan = artifact_dir.join(format!("{stem}.plan.json"));
+    let bitcode = artifact_dir.join(bitcode_name);
     let macro_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let rewriter = macro_dir.join("python").join("rewrite_vmcu_pointwise.py");
+    let rewriter = macro_dir.join("python").join(rewriter_name);
 
     let mut preprocess = Command::new("iree-compile");
     configure_vmcu_target(&mut preprocess, compile_input, llvm_triple, cpu_features);
@@ -148,11 +177,16 @@ fn run_vmcu_pointwise_compile(
     run_command(&mut preprocess, "IREE vMCU preprocessing")?;
 
     let plan_arg = plan.to_string_lossy().into_owned();
+    let mut rewrite_args = vec!["--plan-output".to_owned(), plan_arg.clone()];
+    if generic {
+        rewrite_args.push("--generic".to_owned());
+    }
+    let rewrite_refs: Vec<&str> = rewrite_args.iter().map(String::as_str).collect();
     run_python_filter(
         &rewriter,
         &preprocessing,
         &rewritten,
-        &["--plan-output", &plan_arg],
+        &rewrite_refs,
         "vMCU pointwise-pair rewriter",
     )?;
 
@@ -178,11 +212,16 @@ fn run_vmcu_pointwise_compile(
         .arg(&lowered);
     run_command(&mut lower, "IREE vMCU ukernel lowering")?;
 
+    let mut finalize_args = vec!["--finalize-configured".to_owned()];
+    if generic {
+        finalize_args.push("--generic".to_owned());
+    }
+    let finalize_refs: Vec<&str> = finalize_args.iter().map(String::as_str).collect();
     run_python_filter(
         &rewriter,
         &lowered,
         &finalized,
-        &["--finalize-configured"],
+        &finalize_refs,
         "vMCU configured ukernel finalizer",
     )?;
 
@@ -190,14 +229,14 @@ fn run_vmcu_pointwise_compile(
     let mut clang = Command::new(clang_path);
     clang
         .arg(format!("--target={llvm_triple}"))
-        .arg("-mcpu=cortex-m4")
+        .arg(format!("-mcpu={cpu}"))
         .arg("-mthumb")
         .arg("-ffreestanding")
         .arg("-fno-builtin")
         .arg("-O3")
         .arg("-emit-llvm")
         .arg("-c")
-        .arg(macro_dir.join("vmcu").join("oneliner_vmcu_pointwise.c"))
+        .arg(macro_dir.join("vmcu").join(source_name))
         .arg("-o")
         .arg(&bitcode);
     run_command(&mut clang, "vMCU pointwise bitcode builder")?;

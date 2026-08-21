@@ -59,8 +59,13 @@ pub(super) fn build(
     let (query_fn, query_link_name) = parse_query_function(&object_path)?;
     let footprint = measure_object(&object_path)?;
     let vmcu_plan = match vmcu {
-        Some(VmcuArg::PointwisePair) => Some(load_vmcu_plan(
-            &artifact_dir.join("vmcu-pointwise.plan.json"),
+        Some(mode) => Some(load_vmcu_plan(
+            &artifact_dir.join(match mode {
+                VmcuArg::PointwisePair => "vmcu-pointwise.plan.json",
+                VmcuArg::Mcunet => "vmcu-mcunet.plan.json",
+                VmcuArg::Auto => "vmcu-generic.plan.json",
+            }),
+            mode,
         )?),
         None => None,
     };
@@ -112,18 +117,23 @@ struct VmcuPlanMetadata {
     saved_intermediate_bytes: usize,
 }
 
-fn load_vmcu_plan(path: &Path) -> syn::Result<VmcuPlanArtifact> {
+fn load_vmcu_plan(path: &Path, mode: VmcuArg) -> syn::Result<VmcuPlanArtifact> {
     let plan: VmcuPlanMetadata = serde_json::from_str(
         &fs::read_to_string(path).map_err(|error| syn::Error::new(Span::call_site(), error))?,
     )
     .map_err(|error| syn::Error::new(Span::call_site(), error))?;
-    if plan.schema_version != 1 {
+    if !matches!(plan.schema_version, 1 | 2) {
         return Err(syn::Error::new(
             Span::call_site(),
             format!("unsupported vMCU plan schema {}", plan.schema_version),
         ));
     }
     Ok(VmcuPlanArtifact {
+        mode: match mode {
+            VmcuArg::PointwisePair => "pointwise-pair",
+            VmcuArg::Mcunet => "mcunet",
+            VmcuArg::Auto => "auto",
+        },
         full_intermediate_bytes: plan.full_intermediate_bytes,
         segment_bytes: plan.segment_bytes,
         saved_intermediate_bytes: plan.saved_intermediate_bytes,
