@@ -6,7 +6,7 @@ Oneliner compiles models on your host machine during `cargo build`, so you need 
 
 - Python 3.12 or newer
 - MSRV: 1.95
-- Clang with Cortex-M4 or Cortex-M7 support for the experimental `vmcu = "pointwise-pair"`, `vmcu = "mcunet"`, and `vmcu = "auto"` lowerings
+- Clang with Cortex-M4 or Cortex-M7 support for the experimental `vmcu = "auto"` lowering
 
 The vMCU lowering uses `clang` from `PATH` by default. Set `CLANG` to an explicit compiler path when needed; its LLVM bitcode must be compatible with the installed IREE compiler.
 

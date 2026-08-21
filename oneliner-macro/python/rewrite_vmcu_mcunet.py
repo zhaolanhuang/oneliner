@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Fuses vMCU-compatible subgraphs into segment-buffer ukernels.
 
-The MCUNet mode fuses the 13 inverted bottlenecks of the MCUNet model. The
-generic mode matches every subgraph in any straight-line model that satisfies
-the vMCU patterns (inverted bottleneck, pointwise pair, single 2D convolution,
-fully connected) and leaves all other operations to IREE codegen.
+Matches every subgraph in any straight-line model that satisfies the vMCU
+patterns (inverted bottleneck, pointwise pair, single 2D convolution, fully
+connected) and leaves all other operations to IREE codegen.
 """
 
 from __future__ import annotations
@@ -31,7 +30,6 @@ PAIR_KERNEL_NAME = "oneliner_vmcu_pointwise_pair_s8"
 GENERIC_BITCODE_PATH = "oneliner_vmcu_generic.bc"
 CONFIG_VERSION = 1
 CONFIG_MAGIC = 0x564D4355
-STANDARD_PEAK_INTERMEDIATE_BYTES = 119552
 GENERIC_KERNEL_NAMES = (UKERNEL_NAME, CONV2D_KERNEL_NAME, FC_KERNEL_NAME, PAIR_KERNEL_NAME)
 
 
@@ -715,192 +713,6 @@ def match_residual(
     )
 
 
-def match_mcunet(text: str) -> McunetMatch:
-    context = ir.Context()
-    try:
-        module = ir.Module.parse(text, context=context)
-    except ir.MLIRError as error:
-        raise ValueError(f"invalid MCUNet MLIR: {error}") from error
-    verify(module.operation, "MCUNet module")
-    functions = operations_named(module, "util.func")
-    if len(functions) != 1:
-        raise ValueError(f"expected one util.func, found {len(functions)}")
-    direct = direct_operations(functions[0])
-    index = {candidate: position for position, candidate in enumerate(direct)}
-    depthwise = [candidate for candidate in direct if candidate.name == DEPTHWISE]
-    matmuls = [candidate for candidate in direct if candidate.name == MATMUL]
-    if len(depthwise) != 14 or len(matmuls) != 28:
-        raise ValueError(f"expected the MCUNet contraction inventory (14 depthwise, 28 matmul), found {len(depthwise)} and {len(matmuls)}")
-    pool = [candidate for candidate in direct if candidate.name == "linalg.pooling_nhwc_sum"]
-    if len(pool) != 1:
-        raise ValueError("expected the MCUNet pooling head")
-
-    anchors = []
-    for position, dw in enumerate(depthwise[1:]):
-        dw_index = index[dw]
-        following_limit = index[depthwise[position + 2]] if position + 2 < len(depthwise) else len(direct)
-        before = [candidate for candidate in matmuls if index[candidate] < dw_index]
-        after = [candidate for candidate in matmuls if dw_index < index[candidate] < following_limit]
-        if not before or not after:
-            raise ValueError("could not bracket an inverted bottleneck depthwise contraction")
-        anchors.append((before[-1], dw, after[0]))
-
-    blocks: list[InvertedBottleneck] = []
-    all_slice_operations: set[ir.Operation] = set()
-    for position, (expansion_op, dw, projection_op) in enumerate(anchors):
-        number = position + 1
-        expansion = match_pointwise(expansion_op, f"block {number} expansion")
-        projection = match_pointwise(projection_op, f"block {number} projection")
-        semantic_input = expansion.collapse_input.operands[0]
-        input_shape = tensor_shape(semantic_input, "i8", 4)
-        n, ih, iw, cin = input_shape
-        exp_shape = tensor_shape(expansion.rescale.results[0], "i8", 4)
-        cexp = exp_shape[3]
-        if exp_shape != (n, ih, iw, cexp) or tensor_shape(expansion.weight, "i8", 2) != (cexp, cin):
-            raise ValueError(f"block {number} expansion dimensions are inconsistent")
-        if expansion.collapse_input.operands[0] != semantic_input:
-            raise ValueError(f"block {number} expansion input is disconnected")
-
-        pad = owner_operation(dw.operands[0])
-        fill = owner_operation(dw.operands[4])
-        if pad is None or pad.name != "tensor.pad" or pad.operands[0] != expansion.rescale.results[0]:
-            raise ValueError(f"block {number} depthwise input must be the padded expansion result")
-        if fill is None:
-            raise ValueError(f"block {number} depthwise accumulator is missing")
-        validate_fill(fill, f"block {number} depthwise accumulator")
-        if len(dw.operands) != 5 or scalar_integer(dw.operands[3]) != 0:
-            raise ValueError(f"block {number} depthwise contraction has modified zero points")
-        depthwise_input_zp = require_scalar(dw.operands[2], f"block {number} depthwise input zero point")
-        if depthwise_input_zp != expansion.output_zp:
-            raise ValueError(f"block {number} expansion/depthwise zero points are inconsistent")
-        weight_shape = tensor_shape(dw.operands[1], "i8", 4)
-        kh, kw, weight_channels, depth_multiplier = weight_shape
-        require_constant_tensor(dw.operands[1], "i8", weight_shape, f"block {number} depthwise weight")
-        if weight_channels != cexp or depth_multiplier != 1:
-            raise ValueError(f"block {number} depthwise weight dimensions are inconsistent")
-        strides = dense_ints(dw.attributes["strides"])
-        dilations = dense_ints(dw.attributes["dilations"])
-        if len(strides) != 2 or len(dilations) != 2:
-            raise ValueError(f"block {number} depthwise geometry is malformed")
-        low = tuple(require_scalar(value, f"block {number} low padding") for value in pad.operands[1:5])
-        high = tuple(require_scalar(value, f"block {number} high padding") for value in pad.operands[5:9])
-        if low[0] or low[3] or high[0] or high[3]:
-            raise ValueError(f"block {number} may only pad spatial dimensions")
-        _, pad_body = body(pad, ("tensor.yield",), f"block {number} pad")
-        if len(pad_body[0].operands) != 1 or require_scalar(pad_body[0].operands[0], f"block {number} pad value") != expansion.output_zp:
-            raise ValueError(f"block {number} pad value must equal the expansion zero point")
-        oh = (ih + low[1] + high[1] - dilations[0] * (kh - 1) - 1) // strides[0] + 1
-        ow = (iw + low[2] + high[2] - dilations[1] * (kw - 1) - 1) // strides[1] + 1
-        if tensor_shape(dw.results[0], "i32", 5) != (n, oh, ow, cexp, 1):
-            raise ValueError(f"block {number} depthwise output geometry is inconsistent")
-        dw_collapse = unique_user(dw.results[0], "tensor.collapse_shape", f"block {number} depthwise")
-        dw_bias_add = unique_user(dw_collapse.results[0], "linalg.generic", f"block {number} depthwise collapse")
-        dw_bias = validate_depthwise_bias(dw_bias_add, cexp)
-        dw_rescale = unique_user(dw_bias_add.results[0], "linalg.generic", f"block {number} depthwise bias")
-        dw_multiplier, dw_shift, dw_zp = validate_rescale(dw_rescale, cexp, f"block {number} depthwise")
-        if projection.collapse_input.operands[0] != dw_rescale.results[0]:
-            raise ValueError(f"block {number} depthwise/projection chain is disconnected")
-        projection_matrix = tensor_shape(projection.collapse_input.results[0], "i8", 2)
-        if projection_matrix != (n * oh * ow, cexp):
-            raise ValueError(f"block {number} projection collapse dimensions are inconsistent")
-        cout = tensor_shape(projection.weight, "i8", 2)[0]
-        projection_shape = tensor_shape(projection.rescale.results[0], "i8", 4)
-        if projection_shape != (n, oh, ow, cout):
-            raise ValueError(f"block {number} projection dimensions are inconsistent")
-        if projection.input_zp != dw_zp:
-            raise ValueError(f"block {number} depthwise/projection zero points are inconsistent")
-
-        start = index[expansion.collapse_input]
-        if position + 1 < len(anchors):
-            next_collapse = owner_operation(anchors[position + 1][0].operands[0])
-            if next_collapse is None or next_collapse.name != "tensor.collapse_shape":
-                raise ValueError(f"block {number} is not followed by a canonical expansion collapse")
-            semantic_output = next_collapse.operands[0]
-        else:
-            semantic_output = pool[0].operands[0]
-        if not isinstance(semantic_output, ir.OpResult):
-            raise ValueError(f"block {number} semantic output is not an operation result")
-        end = index[owner_operation(semantic_output)]
-        if end < index[projection.rescale]:
-            raise ValueError(f"block {number} output precedes its projection")
-        erase_operations = tuple(direct[start : end + 1])
-        tail = direct[index[projection.rescale] + 1 : end + 1]
-        residual = None
-        if semantic_output != projection.rescale.results[0]:
-            residual = match_residual(tail, projection.rescale.results[0], semantic_input, projection.output_zp, expansion.input_zp)
-            if residual.output != semantic_output or tensor_shape(semantic_output, "i8", 4) != input_shape:
-                raise ValueError(f"block {number} residual must have the exact input shape")
-        elif tail:
-            raise ValueError(f"block {number} has operations after a non-residual projection")
-        final_zp = residual.final_zp if residual else projection.output_zp
-        residual_config = residual.config if residual else (0,) * 10
-        scratch_bytes = kh * iw * cexp + ow * cexp
-        if residual:
-            scratch_bytes += (high[1] + 1) * ow * cout
-        geometry = (
-            n, ih, iw, cin, oh, ow, cexp, cout, kh, kw,
-            strides[0], strides[1], dilations[0], dilations[1],
-            low[1], low[2], high[1], high[2],
-            expansion.input_zp, expansion.output_zp, dw_zp, projection.output_zp, final_zp,
-            *residual_config, scratch_bytes,
-        )
-        semantic_operations = (
-            expansion.operations
-            | projection.operations
-            | {pad, fill, dw, dw_collapse, dw_bias_add, dw_rescale}
-            | (residual.operations if residual else set())
-        )
-        for candidate in erase_operations:
-            if candidate not in semantic_operations and candidate.name != "tensor.empty":
-                raise ValueError(f"block {number} slice contains unexpected operation {candidate.name}")
-        all_slice_operations.update(erase_operations)
-        blocks.append(
-            InvertedBottleneck(
-                number=number,
-                input=semantic_input,
-                output=semantic_output,
-                expansion=expansion,
-                depthwise=dw,
-                depthwise_weight=dw.operands[1],
-                depthwise_bias=dw_bias,
-                depthwise_multiplier=dw_multiplier,
-                depthwise_shift=dw_shift,
-                depthwise_zp=dw_zp,
-                projection=projection,
-                residual=residual,
-                geometry=geometry,
-                scratch_bytes=scratch_bytes,
-                erase_operations=erase_operations,
-                semantic_operations=semantic_operations,
-            )
-        )
-
-    if len(blocks) != 13 or sum(block.residual is not None for block in blocks) != 7:
-        raise ValueError("expected exactly 13 MCUNet blocks with 7 residual blocks")
-    for block in blocks:
-        internal = set(block.erase_operations)
-        for candidate in block.erase_operations:
-            for result in candidate.results:
-                for use in result.uses:
-                    user = operation(use.owner)
-                    if user not in internal and user not in all_slice_operations and result != block.output:
-                        raise ValueError(f"block {block.number} slice is not closed over SSA uses")
-    max_segment = max(block.scratch_bytes for block in blocks)
-    plan = McunetPlan(
-        mode="mcunet",
-        block_count=len(blocks),
-        residual_block_count=7,
-        in_place_block_count=7,
-        standard_peak_intermediate_bytes=STANDARD_PEAK_INTERMEDIATE_BYTES,
-        max_segment_bytes=max_segment,
-        total_segment_bytes=sum(block.scratch_bytes for block in blocks),
-        full_intermediate_bytes=STANDARD_PEAK_INTERMEDIATE_BYTES,
-        segment_bytes=max_segment,
-        saved_intermediate_bytes=STANDARD_PEAK_INTERMEDIATE_BYTES - max_segment,
-    )
-    return McunetMatch(context=context, module=module, blocks=blocks, plan=plan)
-
-
 def match_conv(candidate: ir.Operation, label: str) -> ConvStage:
     if len(candidate.operands) != 5 or len(candidate.results) != 1:
         raise ValueError(f"{label} conv has modified operands")
@@ -999,12 +811,14 @@ def match_pair_chain(first: ir.Operation, second: ir.Operation, direct: list[ir.
         raise ValueError("pointwise matmuls are not an adjacent producer-consumer pair")
     for matmul, label in ((first, "first"), (second, "second")):
         owner = owner_operation(matmul.operands[1])
-        if owner is None or owner.name != "linalg.transpose" or dense_ints(owner.attributes["permutation"]) != (1, 0):
-            raise ValueError(f"pointwise pair {label} weight must use a [1, 0] transpose")
+        if owner is None or owner.name not in ("arith.constant", "linalg.transpose"):
+            raise ValueError(f"pointwise pair {label} weight must be a compile-time constant")
     input_shape = tensor_shape(first.operands[0], "i8", 2)
-    first_weight_shape = tensor_shape(owner_operation(first.operands[1]).operands[0], "i8", 2)
+    first_weight_source = first.operands[1] if owner_operation(first.operands[1]).name == "arith.constant" else owner_operation(first.operands[1]).operands[0]
+    first_weight_shape = tensor_shape(first_weight_source, "i8", 2)
     intermediate_shape = tensor_shape(first_clamp.results[0], "i8", 2)
-    second_weight_shape = tensor_shape(owner_operation(second.operands[1]).operands[0], "i8", 2)
+    second_weight_source = second.operands[1] if owner_operation(second.operands[1]).name == "arith.constant" else owner_operation(second.operands[1]).operands[0]
+    second_weight_shape = tensor_shape(second_weight_source, "i8", 2)
     output_shape = tensor_shape(second_clamp.results[0], "i8", 2)
     rows, input_channels = input_shape
     first_weight_rows, intermediate_channels = first_weight_shape
@@ -1499,16 +1313,8 @@ def _match_generic_in_context(context: ir.Context, module: ir.Module, text: str)
     return McunetMatch(context=context, module=module, blocks=[], plan=plan, modules=modules)
 
 
-def plan_mcunet(text: str) -> McunetPlan:
-    return match_mcunet(text).plan
-
-
 def plan_generic(text: str) -> McunetPlan:
     return match_generic(text).plan
-
-
-def plan(text: str) -> McunetPlan:
-    return plan_mcunet(text)
 
 
 def custom_maps() -> ir.ArrayAttr:
@@ -1635,7 +1441,7 @@ def create_generic_custom_op(module: GenericModule, position: int) -> ir.Operati
         with ir.InsertionPoint(module.erase_operations[-1]):
             config = arith.ConstantOp(ir.RankedTensorType.get([37], i32), array("i", list(module.config))).result
             scratch = tensor.EmptyOp([module.scratch_bytes], i8).result
-            output = tensor.EmptyOp(list(ir.RankedTensorType(module.output_type).shape), i8).result
+            output = module.input if module.residual else tensor.EmptyOp(list(ir.RankedTensorType(module.output_type).shape), i8).result
             custom = ir.Operation.create(
                 "iree_linalg_ext.custom_op",
                 results=[output.type, scratch.type],
@@ -1755,54 +1561,6 @@ def finalize_generic(text: str) -> tuple[str, int]:
     return output, len(matches)
 
 
-def rewrite(text: str) -> tuple[str, McunetPlan]:
-    matched = match_mcunet(text)
-    with matched.context, ir.Location.unknown():
-        replacements = [create_custom_op(block) for block in matched.blocks]
-        for block, custom in zip(matched.blocks, replacements, strict=True):
-            block.output.replace_all_uses_with(custom.results[0])
-        for block in reversed(matched.blocks):
-            for candidate in reversed(block.erase_operations):
-                candidate.erase()
-            verify(matched.module.operation, f"module after erasing block {block.number}")
-        verify(matched.module.operation, "rewritten MCUNet module")
-        output = matched.module.operation.get_asm(assume_verified=True)
-        reparsed = ir.Module.parse(output)
-        verify(reparsed.operation, "reparsed rewritten MCUNet module")
-    return output, matched.plan
-
-
-def finalize_configured(text: str) -> tuple[str, int]:
-    context = ir.Context()
-    try:
-        module = ir.Module.parse(text, context=context)
-    except ir.MLIRError as error:
-        raise ValueError(f"invalid configured IREE MLIR: {error}") from error
-    verify(module.operation, "configured MCUNet module")
-    with context, ir.Location.unknown():
-        descriptor = ir.Attribute.parse(f'#iree_codegen.ukernel_descriptor<"{UKERNEL_NAME}", bitcode>')
-        matches = []
-        for candidate in operations_named(module, "iree_codegen.ukernel.generic"):
-            if (
-                candidate.attributes.get("iree_codegen.ukernel") == descriptor
-                and "u_kernel_fn_name" in candidate.attributes
-                and ir.StringAttr(candidate.attributes["u_kernel_fn_name"]).value == UKERNEL_NAME
-            ):
-                matches.append(candidate)
-        for candidate in matches:
-            del candidate.attributes["iree_codegen.ukernel"]
-            fn_attributes = {}
-            if "fn_def_attrs" in candidate.attributes:
-                fn_attributes.update({named.name: named.attr for named in ir.DictAttr(candidate.attributes["fn_def_attrs"])})
-            fn_attributes["hal.import.bitcode"] = ir.BoolAttr.get(True)
-            candidate.attributes["fn_def_attrs"] = ir.DictAttr.get(fn_attributes)
-        verify(module.operation, "finalized configured MCUNet module")
-        output = module.operation.get_asm(assume_verified=True)
-        reparsed = ir.Module.parse(output)
-        verify(reparsed.operation, "reparsed finalized MCUNet module")
-    return output, len(matches)
-
-
 def plan_json(plan_value: McunetPlan) -> dict:
     return {"schema_version": 2, **asdict(plan_value)}
 
@@ -1810,29 +1568,20 @@ def plan_json(plan_value: McunetPlan) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--finalize-configured", action="store_true")
-    parser.add_argument("--generic", action="store_true")
     parser.add_argument("--plan-output", type=Path)
     args = parser.parse_args()
     text = sys.stdin.read()
     try:
         if args.finalize_configured:
-            if args.generic:
-                output, count = finalize_generic(text)
-                if count < 1:
-                    raise ValueError(f"expected at least one configured vMCU ukernel, found {count}")
-            else:
-                output, count = finalize_configured(text)
-                if count != 13:
-                    raise ValueError(f"expected 13 configured MCUNet ukernels, found {count}")
+            output, count = finalize_generic(text)
+            if count < 1:
+                raise ValueError(f"expected at least one configured vMCU ukernel, found {count}")
         else:
-            if args.generic:
-                output, plan_value = rewrite_generic(text)
-            else:
-                output, plan_value = rewrite(text)
+            output, plan_value = rewrite_generic(text)
             if args.plan_output:
                 args.plan_output.write_text(json.dumps(plan_json(plan_value), indent=2) + "\n", encoding="utf-8")
     except ValueError as error:
-        print(f"vMCU MCUNet rewrite failed: {error}", file=sys.stderr)
+        print(f"vMCU rewrite failed: {error}", file=sys.stderr)
         return 1
     sys.stdout.write(output)
     return 0

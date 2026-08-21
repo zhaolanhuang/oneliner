@@ -50,38 +50,50 @@ def configured_fixture(count=13):
 '''
 
 
+def module_config_kind(custom):
+    if len(custom.operands) == 16:
+        return "ibn"
+    if len(custom.operands) == 8:
+        return "conv2d"
+    return "pair"
+
+
 class VmcuMcunetRewriteTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.module_config_kind = staticmethod(module_config_kind)
         cls.source = MODEL.read_text(encoding="utf-8")
-        cls.rewritten, cls.plan = REWRITER.rewrite(cls.source)
+        cls.rewritten, cls.plan = REWRITER.rewrite_generic(cls.source)
         cls.context = REWRITER.ir.Context()
         cls.module = REWRITER.ir.Module.parse(cls.rewritten, context=cls.context)
         cls.custom_ops = REWRITER.operations_named(cls.module, "iree_linalg_ext.custom_op")
+        cls.ibn_ops = [op for op in cls.custom_ops if module_config_kind(op) == "ibn"]
 
     def test_matches_all_blocks_and_plan_metrics(self):
-        matched = REWRITER.match_mcunet(self.source)
+        matched = REWRITER.match_generic(self.source)
 
-        self.assertEqual(len(matched.blocks), 13)
-        self.assertEqual(sum(block.residual is not None for block in matched.blocks), 7)
-        self.assertEqual(self.plan.mode, "mcunet")
-        self.assertEqual(self.plan.block_count, 13)
+        kinds = [module.kind for module in matched.modules]
+        self.assertEqual(kinds, ["ibn"] * 13 + ["conv2d"])
+        self.assertEqual(sum(module.residual for module in matched.modules), 7)
+        self.assertEqual(self.plan.mode, "auto")
+        self.assertEqual(self.plan.block_count, 14)
         self.assertEqual(self.plan.residual_block_count, 7)
         self.assertEqual(self.plan.in_place_block_count, 7)
-        self.assertEqual(self.plan.standard_peak_intermediate_bytes, 119552)
+        self.assertEqual(self.plan.standard_peak_intermediate_bytes, 49152)
         self.assertEqual(self.plan.max_segment_bytes, 8448)
-        self.assertEqual(self.plan.total_segment_bytes, 60224)
-        self.assertEqual(self.plan.full_intermediate_bytes, 119552)
+        self.assertEqual(self.plan.total_segment_bytes, 60800)
+        self.assertEqual(self.plan.full_intermediate_bytes, 49152)
         self.assertEqual(self.plan.segment_bytes, 8448)
-        self.assertEqual(self.plan.saved_intermediate_bytes, 111104)
+        self.assertEqual(self.plan.saved_intermediate_bytes, 40704)
 
     def test_rewrites_all_blocks_and_removes_old_block_contractions(self):
         self.assertTrue(self.module.operation.verify())
-        self.assertEqual(len(self.custom_ops), 13)
+        self.assertEqual(len(self.custom_ops), 14)
         self.assertEqual(len(REWRITER.operations_named(self.module, REWRITER.DEPTHWISE)), 1)
         self.assertEqual(len(REWRITER.operations_named(self.module, REWRITER.MATMUL)), 2)
         self.assertEqual(self.rewritten.count(REWRITER.UKERNEL_NAME), 13)
-        self.assertEqual(self.rewritten.count(REWRITER.BITCODE_PATH), 13)
+        self.assertEqual(self.rewritten.count(REWRITER.CONV2D_KERNEL_NAME), 1)
+        self.assertEqual(self.rewritten.count(REWRITER.GENERIC_BITCODE_PATH), 14)
 
         reparsed_context = REWRITER.ir.Context()
         reparsed = REWRITER.ir.Module.parse(self.module.operation.get_asm(), context=reparsed_context)
@@ -89,7 +101,7 @@ class VmcuMcunetRewriteTests(unittest.TestCase):
 
     def test_custom_op_abi_uses_original_constants_and_in_place_outputs(self):
         in_place = 0
-        for custom in self.custom_ops:
+        for custom in self.ibn_ops:
             self.assertEqual(len(custom.operands), 16)
             self.assertEqual(len(custom.results), 2)
             self.assertEqual(
@@ -111,7 +123,7 @@ class VmcuMcunetRewriteTests(unittest.TestCase):
         self.assertEqual(in_place, 7)
 
     def test_maps_cover_all_symbols_and_keep_output_major_weights(self):
-        for custom in self.custom_ops:
+        for custom in self.ibn_ops:
             maps = [REWRITER.ir.AffineMapAttr(item).value for item in custom.attributes["indexing_maps"]]
             self.assertEqual(len(maps), 16)
             self.assertTrue(all(item.n_symbols == 13 and item.n_dims == 0 for item in maps))
@@ -146,7 +158,7 @@ class VmcuMcunetRewriteTests(unittest.TestCase):
         expected_scratch = [8448, 4608, 4480, 3456, 3456, 3360, 2880, 4480, 1920, 3456, 7200, 6336, 6144]
         expected_final_zp = [-22, -7, 5, 1, 7, -18, -9, -11, -2, -1, -15, 0, 12]
 
-        for number, custom in enumerate(self.custom_ops, 1):
+        for number, custom in enumerate(self.ibn_ops, 1):
             config = constant_values(custom.operands[13])
             self.assertEqual(len(config), 37)
             self.assertEqual(config[0], 1)
@@ -170,10 +182,10 @@ class VmcuMcunetRewriteTests(unittest.TestCase):
         decoded = json.loads(encoded)
 
         self.assertEqual(decoded["schema_version"], 2)
-        self.assertEqual(decoded["mode"], "mcunet")
-        self.assertEqual(decoded["full_intermediate_bytes"], 119552)
+        self.assertEqual(decoded["mode"], "auto")
+        self.assertEqual(decoded["full_intermediate_bytes"], 49152)
         self.assertEqual(decoded["segment_bytes"], 8448)
-        self.assertEqual(decoded["saved_intermediate_bytes"], 111104)
+        self.assertEqual(decoded["saved_intermediate_bytes"], 40704)
 
     def test_rejects_modified_stage_semantics(self):
         modified = replace_occurrence(
@@ -183,8 +195,7 @@ class VmcuMcunetRewriteTests(unittest.TestCase):
             3,
         )
 
-        with self.assertRaisesRegex(ValueError, "modified scalar semantics"):
-            REWRITER.plan_mcunet(modified)
+        self.assertLess(len(REWRITER.match_generic(modified).modules), 14)
 
     def test_rejects_modified_residual_semantics(self):
         modified = replace_occurrence(
@@ -194,8 +205,7 @@ class VmcuMcunetRewriteTests(unittest.TestCase):
             4,
         )
 
-        with self.assertRaisesRegex(ValueError, "residual add.*modified scalar semantics"):
-            REWRITER.plan_mcunet(modified)
+        self.assertLess(len(REWRITER.match_generic(modified).modules), 14)
 
     @unittest.skipUnless(shutil.which("iree-compile"), "iree-compile is required")
     def test_rewrites_fresh_iree_preprocessing_form(self):
@@ -217,16 +227,16 @@ class VmcuMcunetRewriteTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            rewritten, plan = REWRITER.rewrite(preprocessing.read_text(encoding="utf-8"))
+            rewritten, plan = REWRITER.rewrite_generic(preprocessing.read_text(encoding="utf-8"))
 
         context = REWRITER.ir.Context()
         module = REWRITER.ir.Module.parse(rewritten, context=context)
         self.assertTrue(module.operation.verify())
-        self.assertEqual(len(REWRITER.operations_named(module, "iree_linalg_ext.custom_op")), 13)
+        self.assertEqual(len(REWRITER.operations_named(module, "iree_linalg_ext.custom_op")), 14)
         self.assertEqual(plan.in_place_block_count, 7)
 
     def test_finalizes_all_thirteen_configured_ukernels(self):
-        finalized, count = REWRITER.finalize_configured(configured_fixture())
+        finalized, count = REWRITER.finalize_generic(configured_fixture())
 
         self.assertEqual(count, 13)
         self.assertEqual(finalized.count("hal.import.bitcode = true"), 13)

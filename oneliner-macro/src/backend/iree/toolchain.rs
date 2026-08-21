@@ -132,27 +132,12 @@ fn run_vmcu_compile(
     let artifact_dir = vmfb
         .parent()
         .ok_or_else(|| syn::Error::new(Span::call_site(), "VMFB output has no parent directory"))?;
-    let (stem, rewriter_name, source_name, bitcode_name, generic) = match mode {
-        VmcuArg::PointwisePair => (
-            "vmcu-pointwise",
-            "rewrite_vmcu_pointwise.py",
-            "oneliner_vmcu_pointwise.c",
-            "oneliner_vmcu_pointwise.bc",
-            false,
-        ),
-        VmcuArg::Mcunet => (
-            "vmcu-mcunet",
-            "rewrite_vmcu_mcunet.py",
-            "oneliner_vmcu_mcunet.c",
-            "oneliner_vmcu_mcunet.bc",
-            false,
-        ),
+    let (stem, rewriter_name, source_name, bitcode_name) = match mode {
         VmcuArg::Auto => (
             "vmcu-generic",
             "rewrite_vmcu_mcunet.py",
             "oneliner_vmcu_generic.c",
             "oneliner_vmcu_generic.bc",
-            true,
         ),
     };
     let cpu = target_cpu.unwrap_or("cortex-m4");
@@ -177,16 +162,11 @@ fn run_vmcu_compile(
     run_command(&mut preprocess, "IREE vMCU preprocessing")?;
 
     let plan_arg = plan.to_string_lossy().into_owned();
-    let mut rewrite_args = vec!["--plan-output".to_owned(), plan_arg.clone()];
-    if generic {
-        rewrite_args.push("--generic".to_owned());
-    }
-    let rewrite_refs: Vec<&str> = rewrite_args.iter().map(String::as_str).collect();
     run_python_filter(
         &rewriter,
         &preprocessing,
         &rewritten,
-        &rewrite_refs,
+        &["--plan-output", &plan_arg],
         "vMCU pointwise-pair rewriter",
     )?;
 
@@ -212,16 +192,11 @@ fn run_vmcu_compile(
         .arg(&lowered);
     run_command(&mut lower, "IREE vMCU ukernel lowering")?;
 
-    let mut finalize_args = vec!["--finalize-configured".to_owned()];
-    if generic {
-        finalize_args.push("--generic".to_owned());
-    }
-    let finalize_refs: Vec<&str> = finalize_args.iter().map(String::as_str).collect();
     run_python_filter(
         &rewriter,
         &lowered,
         &finalized,
-        &finalize_refs,
+        &["--finalize-configured"],
         "vMCU configured ukernel finalizer",
     )?;
 

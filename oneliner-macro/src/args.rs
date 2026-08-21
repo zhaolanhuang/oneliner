@@ -22,8 +22,6 @@ pub enum ArenaArg {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmcuArg {
-    PointwisePair,
-    Mcunet,
     Auto,
 }
 
@@ -112,12 +110,10 @@ fn parse_vmcu(lit: Lit) -> syn::Result<VmcuArg> {
     };
 
     match value.value().as_str() {
-        "pointwise-pair" => Ok(VmcuArg::PointwisePair),
-        "mcunet" => Ok(VmcuArg::Mcunet),
         "auto" => Ok(VmcuArg::Auto),
         other => Err(syn::Error::new(
             value.span(),
-            format!("unknown vmcu mode '{other}', expected 'pointwise-pair', 'mcunet', or 'auto'"),
+            format!("unknown vmcu mode '{other}', expected 'auto'"),
         )),
     }
 }

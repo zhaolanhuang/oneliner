@@ -75,7 +75,7 @@ struct MyModel;
 | `backend` | `"iree"` | `"iree"` | Execution backend. Only IREE is currently available. |
 | `arena` | `"owned"`, `"shared"` | `"owned"` | Workspace memory mode, see [Memory model](docs/memory_model.md). |
 | `format` | `"mlir"`, `"onnx"`, `"pytorch"`/`"pt2"`, `"tensorflow"`/`"tf"`, `"tflite"` | auto-detected from the file extension | Explicit model format override. Required for TensorFlow SavedModel v2 directories (no extension). |
-| `vmcu` | `"pointwise-pair"`, `"mcunet"`, `"auto"` | disabled | Experimental Cortex-M4/M7 streaming lowering. `mcunet` fuses the 13 MCUNet inverted bottlenecks with circular halo buffers and in-place residual outputs. `auto` applies vMCU to any straight-line int8 model whose subgraphs match the vMCU patterns (inverted bottleneck, pointwise pair, single 2D convolution, fully connected); all other operations fall back to IREE codegen. |
+| `vmcu` | `"auto"` | disabled | Experimental Cortex-M4/M7 streaming lowering applied to any straight-line int8 model: subgraphs matching the vMCU patterns (inverted bottleneck, pointwise pair, single 2D convolution, fully connected) become segment-buffer ukernels and all other operations fall back to IREE codegen. |
 
 The format is normally inferred from the extension (`.mlir`, `.onnx`, `.pt2`, `.tflite`); pass `format` explicitly to override it, which is mandatory for TensorFlow SavedModel directories. Duplicate or unknown options are rejected at compile time.
 

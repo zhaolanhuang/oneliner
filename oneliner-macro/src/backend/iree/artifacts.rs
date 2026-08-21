@@ -60,11 +60,7 @@ pub(super) fn build(
     let footprint = measure_object(&object_path)?;
     let vmcu_plan = match vmcu {
         Some(mode) => Some(load_vmcu_plan(
-            &artifact_dir.join(match mode {
-                VmcuArg::PointwisePair => "vmcu-pointwise.plan.json",
-                VmcuArg::Mcunet => "vmcu-mcunet.plan.json",
-                VmcuArg::Auto => "vmcu-generic.plan.json",
-            }),
+            &artifact_dir.join("vmcu-generic.plan.json"),
             mode,
         )?),
         None => None,
@@ -130,8 +126,6 @@ fn load_vmcu_plan(path: &Path, mode: VmcuArg) -> syn::Result<VmcuPlanArtifact> {
     }
     Ok(VmcuPlanArtifact {
         mode: match mode {
-            VmcuArg::PointwisePair => "pointwise-pair",
-            VmcuArg::Mcunet => "mcunet",
             VmcuArg::Auto => "auto",
         },
         full_intermediate_bytes: plan.full_intermediate_bytes,

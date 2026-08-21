@@ -16,7 +16,7 @@ use static_cell::ConstStaticCell;
 #[model(
     "../models/vmcu_pointwise_pair.mlir",
     arena = "shared",
-    vmcu = "pointwise-pair"
+    vmcu = "auto"
 )]
 struct Model;
 
@@ -34,7 +34,7 @@ static INPUT: ConstStaticCell<<Model as ModelInference>::InputTensor> =
 fn main() -> ! {
     let artifacts = <Model as ModelSource>::ARTIFACTS;
     let _ = hprintln!(
-        "pointwise-pair: vmcu={} arena={} input={} output={}",
+        "auto: vmcu={} arena={} input={} output={}",
         !cfg!(feature = "standard"),
         artifacts.ram_size,
         artifacts.input_size,
