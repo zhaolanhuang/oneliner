@@ -22,7 +22,7 @@ from iree.compiler.dialects import arith, tensor
 DEPTHWISE = "linalg.depthwise_conv_2d_nhwc_hwcm_q"
 CONV = "linalg.conv_2d_nhwc_hwcf_q"
 MATMUL = "linalg.quantized_matmul"
-UKERNEL_NAME = "oneliner_vmcu_mcunet_ibn_s8"
+UKERNEL_NAME = "oneliner_vmcu_ibn_s8"
 BITCODE_PATH = "oneliner_vmcu_mcunet.bc"
 CONV2D_KERNEL_NAME = "oneliner_vmcu_conv2d_s8"
 FC_KERNEL_NAME = "oneliner_vmcu_fc_s8"

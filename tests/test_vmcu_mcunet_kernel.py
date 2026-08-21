@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
-SOURCE = ROOT / "oneliner-macro" / "vmcu" / "oneliner_vmcu_mcunet.c"
+SOURCE = ROOT / "oneliner-macro" / "vmcu" / "oneliner_vmcu_generic.c"
 MAGIC = 0x564D4355
 I8 = ctypes.c_int8
 I32 = ctypes.c_int32
@@ -267,7 +267,7 @@ def padded_array(ctype, values, prefix_elements):
 class NativeKernel:
     def __init__(self, library):
         self.library = library
-        self.function = library.oneliner_vmcu_mcunet_ibn_s8
+        self.function = library.oneliner_vmcu_ibn_s8
         pointer_types = [
             P_I8,
             P_I8,
