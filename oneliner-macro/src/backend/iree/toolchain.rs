@@ -50,7 +50,6 @@ pub(super) fn run_iree_compile(
         );
     }
 
-    let cpu = target_cpu.or_else(|| default_cpu(&llvm_triple).map(str::to_owned));
     let mut command = Command::new("iree-compile");
     command
         .arg(compile_input)
@@ -58,7 +57,7 @@ pub(super) fn run_iree_compile(
         .arg("--iree-hal-local-target-device-backends=llvm-cpu")
         .arg("--iree-llvmcpu-target-float-abi=soft")
         .arg(format!("--iree-llvmcpu-target-triple={llvm_triple}"));
-    if let Some(cpu) = cpu {
+    if let Some(cpu) = target_cpu {
         command.arg(format!("--iree-llvmcpu-target-cpu={cpu}"));
     }
     if let Some(features) = cpu_features {
@@ -84,16 +83,6 @@ pub(super) fn run_iree_compile(
         .arg(vmfb);
 
     run_command(&mut command, "iree-compile")
-}
-
-fn default_cpu(llvm_triple: &str) -> Option<&'static str> {
-    match llvm_triple {
-        "thumbv6m-none-eabi" => Some("cortex-m0"),
-        "thumbv7m-none-eabi" => Some("cortex-m3"),
-        "thumbv7em-none-eabi" => Some("cortex-m4"),
-        "thumbv8m.main-none-eabi" => Some("cortex-m33"),
-        _ => None,
-    }
 }
 
 fn configure_vmcu_target(
@@ -149,7 +138,7 @@ fn run_vmcu_compile(
             "oneliner_vmcu_generic.bc",
         ),
     };
-    let cpu = target_cpu.or_else(|| default_cpu(&llvm_triple)).unwrap_or("cortex-m4");
+    let cpu = target_cpu;
     let preprocessing = artifact_dir.join(format!("{stem}.preprocessing.mlir"));
     let rewritten = artifact_dir.join(format!("{stem}.rewritten.mlir"));
     let configured = artifact_dir.join(format!("{stem}.configured.mlir"));
@@ -161,7 +150,7 @@ fn run_vmcu_compile(
     let rewriter = macro_dir.join("python").join(rewriter_name);
 
     let mut preprocess = Command::new("iree-compile");
-    configure_vmcu_target(&mut preprocess, compile_input, llvm_triple, Some(&cpu[..]), cpu_features);
+    configure_vmcu_target(&mut preprocess, compile_input, llvm_triple, cpu.as_deref(), cpu_features);
     preprocess
         .arg("--compile-to=preprocessing")
         .arg("--emit-mlir-bytecode=false")
@@ -180,7 +169,7 @@ fn run_vmcu_compile(
     )?;
 
     let mut configure = Command::new("iree-compile");
-    configure_vmcu_target(&mut configure, &rewritten, llvm_triple, Some(&cpu[..]), cpu_features);
+    configure_vmcu_target(&mut configure, &rewritten, llvm_triple, cpu.as_deref(), cpu_features);
     configure
         .arg("--compile-from=preprocessing")
         .arg("--compile-to=executable-configurations")
@@ -215,7 +204,10 @@ fn run_vmcu_compile(
     if llvm_triple.starts_with("riscv") {
         clang.arg("-march=rv32imac");
     } else {
-        clang.arg(format!("-mcpu={cpu}")).arg("-mthumb");
+        clang.arg("-mthumb");
+        if let Some(cpu) = cpu {
+            clang.arg(format!("-mcpu={cpu}"));
+        }
     }
     clang
         .arg("-ffreestanding")
@@ -229,7 +221,7 @@ fn run_vmcu_compile(
     run_command(&mut clang, "vMCU pointwise bitcode builder")?;
 
     let mut compile = Command::new("iree-compile");
-    configure_vmcu_target(&mut compile, &finalized, llvm_triple, Some(&cpu[..]), cpu_features);
+    configure_vmcu_target(&mut compile, &finalized, llvm_triple, cpu.as_deref(), cpu_features);
     compile
         .arg("--compile-from=executable-configurations")
         .arg("--iree-opt-level=O3")
