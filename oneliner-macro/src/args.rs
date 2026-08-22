@@ -105,7 +105,7 @@ fn parse_vmcu(lit: Lit) -> syn::Result<VmcuArg> {
     let Lit::Str(value) = lit else {
         return Err(syn::Error::new(
             lit.span(),
-            "vmcu must be a string literal, for example vmcu = \"pointwise-pair\"",
+            "vmcu must be a string literal, for example vmcu = \"auto\"",
         ));
     };
 
@@ -227,33 +227,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_pointwise_pair_vmcu() {
+    fn parses_auto_vmcu() {
         let args: AttributeArgs = vec![
             syn::parse_quote!("model.tflite"),
-            syn::parse_quote!(vmcu = "pointwise-pair"),
+            syn::parse_quote!(vmcu = "auto"),
         ];
 
         let args = ModelArgs::parse(args).unwrap();
-        assert_eq!(args.vmcu, Some(VmcuArg::PointwisePair));
-    }
-
-    #[test]
-    fn parses_mcunet_vmcu() {
-        let args: AttributeArgs = vec![
-            syn::parse_quote!("model.mlir"),
-            syn::parse_quote!(vmcu = "mcunet"),
-        ];
-
-        let args = ModelArgs::parse(args).unwrap();
-        assert_eq!(args.vmcu, Some(VmcuArg::Mcunet));
+        assert_eq!(args.vmcu, Some(VmcuArg::Auto));
     }
 
     #[test]
     fn rejects_duplicate_vmcu_options() {
         let args: AttributeArgs = vec![
             syn::parse_quote!("model.tflite"),
-            syn::parse_quote!(vmcu = "pointwise-pair"),
-            syn::parse_quote!(vmcu = "pointwise-pair"),
+            syn::parse_quote!(vmcu = "auto"),
+            syn::parse_quote!(vmcu = "auto"),
         ];
 
         let error = ModelArgs::parse(args)
@@ -274,7 +263,7 @@ mod tests {
             .expect("non-string vmcu rejected");
         assert_eq!(
             error.to_string(),
-            "vmcu must be a string literal, for example vmcu = \"pointwise-pair\""
+            "vmcu must be a string literal, for example vmcu = \"auto\""
         );
     }
 
@@ -288,7 +277,7 @@ mod tests {
         let error = ModelArgs::parse(args).err().expect("unknown vmcu rejected");
         assert_eq!(
             error.to_string(),
-            "unknown vmcu mode 'unsupported', expected 'pointwise-pair' or 'mcunet'"
+            "unknown vmcu mode 'unsupported', expected 'auto'"
         );
     }
 }
