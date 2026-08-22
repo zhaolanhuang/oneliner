@@ -750,6 +750,77 @@ def match_residual(
         ),
     )
 
+def match_conv_pointwise(candidate: ir.Operation, label: str) -> Stage:
+    """Matches a 1x1 pointwise convolution as an inverted-bottleneck stage.
+
+    TFLite-imported models (MLPerf Tiny) lower pointwise convolutions to
+    linalg.conv_2d_nhwc_hwcf_q with kernel 1x1 instead of quantized matmul.
+    The transposed weight's pre-transpose constant is [f,h,w,c] =
+    [cout,1,1,cin], whose flattened values are exactly the output-major
+    [cout,cin] layout the inverted bottleneck ukernel expects; a 2D
+    constant is synthesized from it.
+    """
+    stage = match_conv(candidate, label)
+    n, ih, iw, cin, oh, ow, cout, kh, kw, sh, sw, dh, dw, pt, pl, pb, pr, izp, ozp, scratch = stage.geometry
+    if kh != 1 or kw != 1 or sh != 1 or sw != 1 or dh != 1 or dw != 1:
+        raise ValueError(f"{label} pointwise conv must have a 1x1 kernel and unit strides")
+    if pt or pl or pb or pr:
+        raise ValueError(f"{label} pointwise conv must not pad")
+    transpose = stage.transpose
+    if dense_ints(transpose.attributes["permutation"]) != (1, 2, 3, 0):
+        raise ValueError(f"{label} pointwise conv weight must use a [1, 2, 3, 0] transpose")
+    source = transpose.operands[0]
+    require_constant_tensor(source, "i8", (cout, kh, kw, cin), f"{label} pointwise weight")
+    values = [int(item) for item in owner_operation(source).attributes["value"]]
+    with candidate.context, ir.Location.unknown():
+        with ir.InsertionPoint(candidate):
+            i8 = ir.IntegerType.get_signless(8)
+            weight = arith.ConstantOp(
+                ir.RankedTensorType.get([cout, cin], i8),
+                ir.DenseIntElementsAttr.get(
+                    array("b", values),
+                    type=ir.RankedTensorType.get([cout, cin], i8),
+                ),
+            ).result
+    operations = set(stage.operations) | {transpose}
+    return Stage(
+        contraction=candidate,
+        collapse_input=candidate,
+        transpose=transpose,
+        weight=weight,
+        bias_init=stage.bias_init,
+        bias=stage.bias,
+        expand=candidate,
+        rescale=stage.rescale,
+        multiplier=stage.multiplier,
+        shift=stage.shift,
+        input_zp=izp,
+        output_zp=ozp,
+        operations=operations,
+        rank=4,
+    )
+
+
+def match_stage(candidate: ir.Operation, label: str) -> Stage:
+    if candidate.name == MATMUL:
+        return match_pointwise(candidate, label, 4)
+    if candidate.name == CONV:
+        return match_conv_pointwise(candidate, label)
+    raise ValueError(f"{label} is not a pointwise stage")
+
+
+def pointwise_candidates(direct: list[ir.Operation]) -> list[ir.Operation]:
+    candidates = [candidate for candidate in direct if candidate.name == MATMUL]
+    for candidate in direct:
+        if candidate.name != CONV:
+            continue
+        try:
+            match_conv_pointwise(candidate, "pointwise filter")
+        except ValueError:
+            continue
+        candidates.append(candidate)
+    return candidates
+
 
 def match_conv(candidate: ir.Operation, label: str) -> ConvStage:
     if len(candidate.operands) != 5 or len(candidate.results) != 1:
@@ -877,8 +948,8 @@ def match_pair_chain(first: ir.Operation, second: ir.Operation, direct: list[ir.
 
 
 def match_ib_block(dw: ir.Operation, expansion_op: ir.Operation, projection_op: ir.Operation, direct: list[ir.Operation], index: dict, number: int) -> InvertedBottleneck:
-    expansion = match_pointwise(expansion_op, f"block {number} expansion")
-    projection = match_pointwise(projection_op, f"block {number} projection")
+    expansion = match_stage(expansion_op, f"block {number} expansion")
+    projection = match_stage(projection_op, f"block {number} projection")
     semantic_input = expansion.collapse_input.operands[0]
     input_shape = tensor_shape(semantic_input, "i8", 4)
     n, ih, iw, cin = input_shape
@@ -927,9 +998,13 @@ def match_ib_block(dw: ir.Operation, expansion_op: ir.Operation, projection_op: 
     dw_multiplier, dw_shift, dw_zp = validate_rescale(dw_rescale, cexp, f"block {number} depthwise")
     if projection.collapse_input.operands[0] != dw_rescale.results[0]:
         raise ValueError(f"block {number} depthwise/projection chain is disconnected")
-    projection_matrix = tensor_shape(projection.collapse_input.results[0], "i8", 2)
-    if projection_matrix != (n * oh * ow, cexp):
-        raise ValueError(f"block {number} projection collapse dimensions are inconsistent")
+    if projection.contraction.name == CONV:
+        if tensor_shape(projection.collapse_input.operands[0], "i8", 4) != (n, oh, ow, cexp):
+            raise ValueError(f"block {number} projection input dimensions are inconsistent")
+    else:
+        projection_matrix = tensor_shape(projection.collapse_input.results[0], "i8", 2)
+        if projection_matrix != (n * oh * ow, cexp):
+            raise ValueError(f"block {number} projection collapse dimensions are inconsistent")
     cout = tensor_shape(projection.weight, "i8", 2)[0]
     projection_shape = tensor_shape(projection.rescale.results[0], "i8", 4)
     if projection_shape != (n, oh, ow, cout):
@@ -940,6 +1015,7 @@ def match_ib_block(dw: ir.Operation, expansion_op: ir.Operation, projection_op: 
     start = index[expansion.collapse_input]
     semantic_output = projection.rescale.results[0]
     internal = set(projection.operations)
+    internal.update(expansion.operations)
     cursor = projection.rescale.results[0]
     while True:
         users = [
@@ -957,7 +1033,7 @@ def match_ib_block(dw: ir.Operation, expansion_op: ir.Operation, projection_op: 
     end = index[owner_operation(semantic_output)]
     if end < index[projection.rescale]:
         raise ValueError(f"block {number} output precedes its projection")
-    erase_operations = tuple(direct[start : end + 1])
+    erase_operations = erase_slice(direct, start, end)
     tail = direct[index[projection.rescale] + 1 : end + 1]
     residual = None
     if semantic_output != projection.rescale.results[0]:
@@ -1205,18 +1281,17 @@ def _match_generic_in_context(context: ir.Context, module: ir.Module, text: str)
     convs = [candidate for candidate in direct if candidate.name == CONV]
     matmuls = [candidate for candidate in direct if candidate.name == MATMUL]
 
+    pointwise_ops = pointwise_candidates(direct)
     for dw in depthwise:
         dw_index = index[dw]
-        before = [candidate for candidate in matmuls if index[candidate] < dw_index and candidate not in consumed]
-        after = [candidate for candidate in matmuls if index[candidate] > dw_index and candidate not in consumed]
+        before = [candidate for candidate in pointwise_ops if index[candidate] < dw_index and candidate not in consumed]
+        after = [candidate for candidate in pointwise_ops if index[candidate] > dw_index and candidate not in consumed]
         if not before or not after:
             continue
         try:
             block = match_ib_block(dw, before[-1], after[0], direct, index, len(modules) + 1)
         except ValueError:
             continue
-        if consumed & set(block.erase_operations):
-            raise ValueError("overlapping vMCU module matches")
         consumed.update(block.erase_operations)
         modules.append(
             GenericModule(
@@ -1555,10 +1630,17 @@ def rewrite_generic(text: str) -> tuple[str, McunetPlan]:
         replacements = [create_generic_custom_op(module, position) for position, module in enumerate(matched.modules)]
         for module, custom in zip(matched.modules, replacements, strict=True):
             module.output.replace_all_uses_with(custom.results[0])
+        erased = []
+        seen = set()
         for module in reversed(matched.modules):
             for candidate in reversed(module.erase_operations):
-                candidate.erase()
-            verify(matched.module.operation, f"module after erasing {module.kind} module")
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                erased.append(candidate)
+        for candidate in erased:
+            candidate.erase()
+        verify(matched.module.operation, "rewritten vMCU module (erased)")
         verify(matched.module.operation, "rewritten vMCU module")
         output = matched.module.operation.get_asm(assume_verified=True)
         reparsed = ir.Module.parse(output)

@@ -314,6 +314,98 @@ def synthetic_mixed_model() -> str:
 """
 
 
+
+def synthetic_conv_ib_model() -> str:
+    """An inverted bottleneck whose pointwise stages are 1x1 hwcf convs
+    (conv1x1 -> depthwise -> conv1x1), the TFLite-import form."""
+    return """module attributes {stream.affinity.default = #hal.device.affinity<@__device_0>, tosa.target_env = #tosa.target_env<specification_version = "1.0", level = none, profiles = [pro_int, pro_fp], extensions = [dynamic, doubleround]>} {
+  util.global private @__device_0 = #hal.device.target<"local", [#hal.executable.target<"llvm-cpu", "embedded-elf-unknown", {cpu = "", cpu_features = "", data_layout = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64", iree.encoding.resolver = #iree_cpu.cpu_encoding_resolver<>, max_stack_allocation_size = 32768 : i64, native_vector_size = 16 : i64, target_triple = "thumbv7em-unknown-unknown-eabi-elf"}>]> : !hal.device
+  util.func public @main(%arg0: tensor<1x6x6x2xi8> {ml_program.identifier = "input"}) -> tensor<1x6x6x2xi8> {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2_i32 = arith.constant 2 : i32
+    %c0_i32 = arith.constant 0 : i32
+    %c-128_i8 = arith.constant -128 : i8
+    %c-128_i32 = arith.constant -128 : i32
+    %c127_i32 = arith.constant 127 : i32
+    %we = arith.constant dense<[[[[1, 2]]], [[[-1, 1]]], [[[2, 0]]]]> : tensor<3x1x1x2xi8>
+    %we_empty = tensor.empty() : tensor<1x1x2x3xi8>
+    %we_t = linalg.transpose ins(%we : tensor<3x1x1x2xi8>) outs(%we_empty : tensor<1x1x2x3xi8>) permutation = [1, 2, 3, 0]
+    %be = arith.constant dense<[10, -20, 30]> : tensor<3xi32>
+    %ae_empty = tensor.empty() : tensor<1x6x6x3xi32>
+    %ae = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>], iterator_types = ["parallel", "parallel", "parallel", "parallel"]} ins(%be : tensor<3xi32>) outs(%ae_empty : tensor<1x6x6x3xi32>) {
+    ^bb0(%in: i32, %out: i32):
+      linalg.yield %in : i32
+    } -> tensor<1x6x6x3xi32>
+    %exp = linalg.conv_2d_nhwc_hwcf_q {dilations = dense<1> : tensor<2xi64>, strides = dense<1> : tensor<2xi64>} ins(%arg0, %we_t, %c2_i32, %c0_i32 : tensor<1x6x6x2xi8>, tensor<1x1x2x3xi8>, i32, i32) outs(%ae : tensor<1x6x6x3xi32>) -> tensor<1x6x6x3xi32>
+    %me = arith.constant dense<[1073741824, 1610612736, 1879048192]> : tensor<3xi32>
+    %se = arith.constant dense<[30, 31, 32]> : tensor<3xi8>
+    %oe_empty = tensor.empty() : tensor<1x6x6x3xi8>
+    %exp8 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>, affine_map<(d0, d1, d2, d3) -> (d3)>, affine_map<(d0, d1, d2, d3) -> (d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>], iterator_types = ["parallel", "parallel", "parallel", "parallel"]} ins(%exp, %me, %se : tensor<1x6x6x3xi32>, tensor<3xi32>, tensor<3xi8>) outs(%oe_empty : tensor<1x6x6x3xi8>) {
+    ^bb0(%v: i32, %m: i32, %s: i8, %o: i8):
+      %277 = tosa.apply_scale %v, %m, %s {rounding_mode = DOUBLE_ROUND} : (i32, i32, i8) -> i32
+      %278 = arith.addi %277, %c-128_i32 : i32
+      %279 = arith.maxsi %278, %c-128_i32 : i32
+      %280 = arith.minsi %279, %c127_i32 : i32
+      %281 = arith.trunci %280 : i32 to i8
+      linalg.yield %281 : i8
+    } -> tensor<1x6x6x3xi8>
+    %padded = tensor.pad %exp8 low[%c0, %c1, %c1, %c0] high[%c0, %c1, %c1, %c0] {
+    ^bb0(%a0: index, %a1: index, %a2: index, %a3: index):
+      tensor.yield %c-128_i8 : i8
+    } : tensor<1x6x6x3xi8> to tensor<1x8x8x3xi8>
+    %wd = arith.constant dense<[[[[1], [2], [1]], [[0], [-1], [1]], [[1], [0], [2]]], [[[2], [1], [0]], [[1], [1], [2]], [[0], [2], [1]]], [[[1], [0], [1]], [[2], [2], [0]], [[1], [1], [2]]]]> : tensor<3x3x3x1xi8>
+    %d_empty = tensor.empty() : tensor<1x6x6x3x1xi32>
+    %fill = linalg.fill ins(%c0_i32 : i32) outs(%d_empty : tensor<1x6x6x3x1xi32>) -> tensor<1x6x6x3x1xi32>
+    %dw = linalg.depthwise_conv_2d_nhwc_hwcm_q {dilations = dense<1> : tensor<2xi64>, strides = dense<1> : tensor<2xi64>} ins(%padded, %wd, %c-128_i32, %c0_i32 : tensor<1x8x8x3xi8>, tensor<3x3x3x1xi8>, i32, i32) outs(%fill : tensor<1x6x6x3x1xi32>) -> tensor<1x6x6x3x1xi32>
+    %collapsed = tensor.collapse_shape %dw [[0], [1], [2], [3, 4]] : tensor<1x6x6x3x1xi32> into tensor<1x6x6x3xi32>
+    %bd = arith.constant dense<[5, -5, 5]> : tensor<3xi32>
+    %add_empty = tensor.empty() : tensor<1x6x6x3xi32>
+    %bias_d = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>], iterator_types = ["parallel", "parallel", "parallel", "parallel"]} ins(%bd, %collapsed : tensor<3xi32>, tensor<1x6x6x3xi32>) outs(%add_empty : tensor<1x6x6x3xi32>) {
+    ^bb0(%in: i32, %in_2: i32, %out: i32):
+      %277 = arith.addi %in, %in_2 : i32
+      linalg.yield %277 : i32
+    } -> tensor<1x6x6x3xi32>
+    %md = arith.constant dense<[1610612736, 1073741824, 1610612736]> : tensor<3xi32>
+    %sd = arith.constant dense<[31, 30, 31]> : tensor<3xi8>
+    %od_empty = tensor.empty() : tensor<1x6x6x3xi8>
+    %dw8 = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>, affine_map<(d0, d1, d2, d3) -> (d3)>, affine_map<(d0, d1, d2, d3) -> (d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>], iterator_types = ["parallel", "parallel", "parallel", "parallel"]} ins(%bias_d, %md, %sd : tensor<1x6x6x3xi32>, tensor<3xi32>, tensor<3xi8>) outs(%od_empty : tensor<1x6x6x3xi8>) {
+    ^bb0(%v: i32, %m: i32, %s: i8, %o: i8):
+      %277 = tosa.apply_scale %v, %m, %s {rounding_mode = DOUBLE_ROUND} : (i32, i32, i8) -> i32
+      %278 = arith.addi %277, %c2_i32 : i32
+      %279 = arith.maxsi %278, %c-128_i32 : i32
+      %280 = arith.minsi %279, %c127_i32 : i32
+      %281 = arith.trunci %280 : i32 to i8
+      linalg.yield %281 : i8
+    } -> tensor<1x6x6x3xi8>
+    %wp = arith.constant dense<[[[[1, 0, 2]]], [[[-1, 1, 1]]]]> : tensor<2x1x1x3xi8>
+    %wp_empty = tensor.empty() : tensor<1x1x3x2xi8>
+    %wp_t = linalg.transpose ins(%wp : tensor<2x1x1x3xi8>) outs(%wp_empty : tensor<1x1x3x2xi8>) permutation = [1, 2, 3, 0]
+    %bp = arith.constant dense<[100, -100]> : tensor<2xi32>
+    %ap_empty = tensor.empty() : tensor<1x6x6x2xi32>
+    %ap = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>], iterator_types = ["parallel", "parallel", "parallel", "parallel"]} ins(%bp : tensor<2xi32>) outs(%ap_empty : tensor<1x6x6x2xi32>) {
+    ^bb0(%in: i32, %out: i32):
+      linalg.yield %in : i32
+    } -> tensor<1x6x6x2xi32>
+    %proj = linalg.conv_2d_nhwc_hwcf_q {dilations = dense<1> : tensor<2xi64>, strides = dense<1> : tensor<2xi64>} ins(%dw8, %wp_t, %c2_i32, %c0_i32 : tensor<1x6x6x3xi8>, tensor<1x1x3x2xi8>, i32, i32) outs(%ap : tensor<1x6x6x2xi32>) -> tensor<1x6x6x2xi32>
+    %mp = arith.constant dense<[1610612736, 1073741824]> : tensor<2xi32>
+    %sp = arith.constant dense<[31, 30]> : tensor<2xi8>
+    %op_empty = tensor.empty() : tensor<1x6x6x2xi8>
+    %out = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>, affine_map<(d0, d1, d2, d3) -> (d3)>, affine_map<(d0, d1, d2, d3) -> (d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>], iterator_types = ["parallel", "parallel", "parallel", "parallel"]} ins(%proj, %mp, %sp : tensor<1x6x6x2xi32>, tensor<2xi32>, tensor<2xi8>) outs(%op_empty : tensor<1x6x6x2xi8>) {
+    ^bb0(%v: i32, %m: i32, %s: i8, %o: i8):
+      %277 = tosa.apply_scale %v, %m, %s {rounding_mode = DOUBLE_ROUND} : (i32, i32, i8) -> i32
+      %278 = arith.addi %277, %c-128_i32 : i32
+      %279 = arith.maxsi %278, %c-128_i32 : i32
+      %280 = arith.minsi %279, %c127_i32 : i32
+      %281 = arith.trunci %280 : i32 to i8
+      linalg.yield %281 : i8
+    } -> tensor<1x6x6x2xi8>
+    util.return %out : tensor<1x6x6x2xi8>
+  }
+}
+"""
+
+
 def synthetic_arith_rescale_model() -> str:
     """One conv2d whose rescale uses the expanded 64-bit DOUBLE_ROUND arith
     form (IREE's ApplyScaleGenericOpConverter lowering, as produced for
@@ -456,6 +548,31 @@ class VmcuGenericRewriteTests(unittest.TestCase):
 } }"""
         with self.assertRaises(ValueError):
             REWRITER.match_generic(empty)
+
+    def test_matches_conv_pointwise_inverted_bottleneck(self):
+        """A pointwise 1x1 convolution (hwcf) can serve as the expansion and
+        projection stages of an inverted bottleneck (TFLite-imported models
+        lower pointwise convs to linalg.conv_2d_nhwc_hwcf_q with kernel 1)."""
+        source = synthetic_conv_ib_model()
+        context = REWRITER.ir.Context()
+        module = REWRITER.ir.Module.parse(source, context=context)
+        direct = REWRITER.direct_operations([f for f in REWRITER.operations_named(module, "util.func")][0])
+        index = {c: i for i, c in enumerate(direct)}
+        convs = [c for c in direct if c.name == REWRITER.CONV]
+        dws = [c for c in direct if c.name == REWRITER.DEPTHWISE]
+        dw = dws[0]
+        before = [c for c in convs if index[c] < index[dw]]
+        after = [c for c in convs if index[c] > index[dw]]
+        block = REWRITER.match_ib_block(dw, before[-1], after[0], direct, index, 1)
+        self.assertIsNone(block.residual)
+        self.assertEqual(
+            tuple(REWRITER.ir.RankedTensorType(block.expansion.weight.type).shape),
+            (3, 2),
+        )
+        self.assertEqual(
+            tuple(REWRITER.ir.RankedTensorType(block.projection.weight.type).shape),
+            (2, 3),
+        )
 
     def test_matches_expanded_arith_rescale_conv(self):
         matched = REWRITER.match_generic(synthetic_arith_rescale_model())
