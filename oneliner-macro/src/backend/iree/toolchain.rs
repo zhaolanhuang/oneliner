@@ -209,6 +209,17 @@ fn run_vmcu_compile(
             clang.arg(format!("-mcpu={cpu}"));
         }
     }
+    // Keep clang's target configuration aligned with the iree-compile
+    // invocation: the rustc target features (e.g. riscv32imac "+m,+a,+c",
+    // or a future "-dsp" for thumbv7em) are forwarded to clang as well so
+    // the bitcode carries the same function-level target-features.
+    if let Some(features) = cpu_features {
+        for feature in features.split(',') {
+            if !feature.is_empty() {
+                clang.arg("-Xclang").arg("-target-feature").arg("-Xclang").arg(feature);
+            }
+        }
+    }
     clang
         .arg("-ffreestanding")
         .arg("-fno-builtin")
