@@ -124,6 +124,7 @@ class GenericModule:
     erase_operations: tuple[ir.Operation, ...]
     standard_bytes: int
     residual: bool = False
+    variant: str | None = None
 
 
 @dataclass
@@ -1488,23 +1489,32 @@ def create_custom_op(block: InvertedBottleneck, kernel_name: str = UKERNEL_NAME,
 def create_generic_custom_op(module: GenericModule, position: int) -> ir.Operation:
     i8 = ir.IntegerType.get_signless(8)
     i32 = ir.IntegerType.get_signless(32)
+    specialized = module.variant is not None
     if module.kind in ("conv2d", "fc"):
         with ir.InsertionPoint(module.erase_operations[-1]):
-            config = arith.ConstantOp(ir.RankedTensorType.get([37], i32), array("i", list(module.config))).result
+            if specialized:
+                config_operands: tuple = ()
+                segment_sizes = [5, 2]
+            else:
+                config = arith.ConstantOp(ir.RankedTensorType.get([37], i32), array("i", list(module.config))).result
+                config_operands = (config,)
+                segment_sizes = [6, 2]
             scratch = tensor.EmptyOp([module.scratch_bytes], i8).result
             output = tensor.EmptyOp(list(ir.RankedTensorType(module.output_type).shape), i8).result
-            inputs = [*module.input_operands, config]
+            inputs = [*module.input_operands, *config_operands]
+            kernel_name = module.variant if specialized else module.kernel_name
+            bitcode_path = f"{module.variant}.bc" if specialized else GENERIC_BITCODE_PATH
             custom = ir.Operation.create(
                 "iree_linalg_ext.custom_op",
                 results=[output.type, scratch.type],
                 operands=[*inputs, output, scratch],
                 attributes={
-                    "indexing_maps": conv_fc_maps(module.kind),
+                    "indexing_maps": conv_fc_maps(module.kind, specialized),
                     "iterator_types": ir.ArrayAttr.get([]),
-                    "operandSegmentSizes": ir.DenseI32ArrayAttr.get([6, 2]),
-                    "iree_codegen.ukernel": ir.Attribute.parse(f'#iree_codegen.ukernel_descriptor<"{module.kernel_name}", bitcode>'),
+                    "operandSegmentSizes": ir.DenseI32ArrayAttr.get(segment_sizes),
+                    "iree_codegen.ukernel": ir.Attribute.parse(f'#iree_codegen.ukernel_descriptor<"{kernel_name}", bitcode>'),
                     "hal.executable.objects": ir.ArrayAttr.get(
-                        [ir.Attribute.parse(f'#hal.executable.object<{{path = "{GENERIC_BITCODE_PATH}"}}>')]
+                        [ir.Attribute.parse(f'#hal.executable.object<{{path = "{bitcode_path}"}}>')]
                     ),
                 },
                 regions=1,
@@ -1515,7 +1525,10 @@ def create_generic_custom_op(module: GenericModule, position: int) -> ir.Operati
             ir.Type.parse("tensor<?xi32>"),
             ir.Type.parse("tensor<?xi32>"),
             ir.Type.parse("tensor<?xi8>"),
-            ir.Type.parse("tensor<?xi32>"),
+        ]
+        if not specialized:
+            dynamic_types.append(ir.Type.parse("tensor<?xi32>"))
+        dynamic_types += [
             ir.Type.parse("tensor<?x?x?x?xi8>") if module.kind == "conv2d" else ir.Type.parse("tensor<?x?xi8>"),
             ir.Type.parse("tensor<?xi8>"),
         ]
@@ -1589,17 +1602,23 @@ def create_generic_custom_op(module: GenericModule, position: int) -> ir.Operati
     return custom
 
 
-def conv_fc_maps(kind: str) -> ir.ArrayAttr:
+def conv_fc_maps(kind: str, specialized: bool = False) -> ir.ArrayAttr:
     if kind == "conv2d":
         symbols = [ir.AffineSymbolExpr.get(index) for index in range(11)]
         results = (
             (0, 1, 2, 3), (7, 8, 3, 6), (6,), (6,), (6,), (9,),
+            (0, 4, 5, 6), (10,),
+        ) if not specialized else (
+            (0, 1, 2, 3), (7, 8, 3, 6), (6,), (6,), (6,),
             (0, 4, 5, 6), (10,),
         )
     else:
         symbols = [ir.AffineSymbolExpr.get(index) for index in range(5)]
         results = (
             (0, 1), (2, 1), (2,), (2,), (2,), (3,),
+            (0, 2), (4,),
+        ) if not specialized else (
+            (0, 1), (2, 1), (2,), (2,), (2,),
             (0, 2), (4,),
         )
     return ir.ArrayAttr.get(
@@ -1624,8 +1643,85 @@ def pair_maps() -> ir.ArrayAttr:
     )
 
 
-def rewrite_generic(text: str) -> tuple[str, McunetPlan]:
+SPECIALIZATION_FILENAME = "vmcu-generic.specializations.json"
+
+
+def conv2d_shape_key(config: tuple[int, ...]) -> tuple[int, ...]:
+    return tuple(config[2:21])
+
+
+def fc_shape_key(config: tuple[int, ...]) -> tuple[int, ...]:
+    return (config[2], config[3], config[4], config[20], config[21])
+
+
+def shape_key(module: GenericModule) -> tuple[int, ...]:
+    if module.kind == "conv2d":
+        return conv2d_shape_key(module.config)
+    if module.kind == "fc":
+        return fc_shape_key(module.config)
+    return ()
+
+
+def specialized_macros(module: GenericModule) -> dict[str, int]:
+    if module.kind == "conv2d":
+        n, ih, iw, cin, oh, ow, cout, kh, kw, sh, sw, dh, dw, pt, pl, _pb, _pr, izp, ozp = conv2d_shape_key(module.config)
+        return {
+            "N": n, "IH": ih, "IW": iw, "CIN": cin, "OH": oh, "OW": ow,
+            "COUT": cout, "KH": kh, "KW": kw, "SH": sh, "SW": sw,
+            "DH": dh, "DW": dw, "PT": pt, "PL": pl,
+            "INPUT_ZP": izp, "OUTPUT_ZP": ozp,
+        }
+    if module.kind == "fc":
+        rows, cin, cout, izp, ozp = fc_shape_key(module.config)
+        return {"ROWS": rows, "CIN": cin, "COUT": cout, "INPUT_ZP": izp, "OUTPUT_ZP": ozp}
+    return {}
+
+
+def assign_specializations(modules: list[GenericModule], artifact_dir: Path) -> dict[str, dict]:
+    """Assigns a unique specialized variant to every conv2d/fc module (sharing
+    variants across modules with identical shapes), emits the wrapper C source
+    per variant and the specializations manifest consumed by the toolchain."""
+    variants: dict[tuple[str, tuple[int, ...]], str] = {}
+    variant_meta: dict[str, dict] = {}
+    for module in modules:
+        if module.kind not in ("conv2d", "fc"):
+            continue
+        key = (module.kind, shape_key(module))
+        if key not in variants:
+            index = len(variants) + 1
+            name = f"{module.kernel_name}_v{index}"
+            macros = specialized_macros(module)
+            source = f"{name}.c"
+            if module.kind == "conv2d":
+                entry = "VMCU_C2_ENTRY"
+            else:
+                entry = "VMCU_FC_ENTRY"
+            lines = ["/* generated by oneliner rewriter: shape-specialized vMCU kernel */",
+                     "#define VMCU_SPECIALIZED"]
+            lines += [f"#define VMCU_{field} {value}" for field, value in macros.items()]
+            lines.append(f"#define {entry} {name}")
+            lines.append(f'#include "oneliner_vmcu_{module.kind}.c"')
+            (artifact_dir / source).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            variants[key] = name
+            variant_meta[name] = {
+                "kind": module.kind,
+                "source": source,
+                "bitcode": f"{name}.bc",
+                "shapes": {field: value for field, value in macros.items()},
+            }
+        module.variant = variants[key]
+    if variants:
+        (artifact_dir / SPECIALIZATION_FILENAME).write_text(
+            json.dumps({"schema_version": 2, "variants": variant_meta}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return variant_meta
+
+
+def rewrite_generic(text: str, artifact_dir: Path | None = None) -> tuple[str, McunetPlan]:
     matched = match_generic(text)
+    if artifact_dir is not None:
+        assign_specializations(matched.modules, artifact_dir)
     with matched.context, ir.Location.unknown():
         replacements = [create_generic_custom_op(module, position) for position, module in enumerate(matched.modules)]
         for module, custom in zip(matched.modules, replacements, strict=True):
@@ -1661,7 +1757,9 @@ def finalize_generic(text: str) -> tuple[str, int]:
             if "u_kernel_fn_name" not in candidate.attributes:
                 continue
             name = ir.StringAttr(candidate.attributes["u_kernel_fn_name"]).value
-            if name not in GENERIC_KERNEL_NAMES:
+            if name not in GENERIC_KERNEL_NAMES and not any(
+                name.startswith(base + "_") for base in GENERIC_KERNEL_NAMES
+            ):
                 continue
             matches.append(candidate)
         for candidate in matches:
@@ -1686,6 +1784,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--finalize-configured", action="store_true")
     parser.add_argument("--plan-output", type=Path)
+    parser.add_argument("--artifact-dir", type=Path)
     args = parser.parse_args()
     text = sys.stdin.read()
     try:
@@ -1694,7 +1793,7 @@ def main() -> int:
             if count < 1:
                 raise ValueError(f"expected at least one configured vMCU ukernel, found {count}")
         else:
-            output, plan_value = rewrite_generic(text)
+            output, plan_value = rewrite_generic(text, artifact_dir=args.artifact_dir)
             if args.plan_output:
                 args.plan_output.write_text(json.dumps(plan_json(plan_value), indent=2) + "\n", encoding="utf-8")
     except ValueError as error:

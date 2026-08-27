@@ -152,4 +152,30 @@ static inline void copy_bytes(int8_t *destination, const int8_t *source,
    multiplier_base != NULL && shift_base != NULL && config_base != NULL &&     \
    output_base != NULL && scratch_base != NULL)
 
+/* Shape-specialized variant of the single-configuration ABI: the config
+ * tensor is dropped (shapes and zero points become compile-time macros) and
+ * the exported function is named by VMCU_ENTRY_NAME. */
+#define VMCU_SINGLE_ARGUMENTS_NO_CONFIG                                        \
+  const int8_t *input_base, size_t input_offset,                               \
+      const int8_t *weight_base, size_t weight_offset,                         \
+      const int32_t *bias_base, size_t bias_offset,                            \
+      const int32_t *multiplier_base, size_t multiplier_offset,                \
+      const int8_t *shift_base, size_t shift_offset,                           \
+      int8_t *output_base, size_t output_offset, int8_t *scratch_base,         \
+      size_t scratch_offset
+
+#define VMCU_SINGLE_CALL_NO_CONFIG                                             \
+  CONST_TENSOR(int8_t, input_base, input_offset),                              \
+      CONST_TENSOR(int8_t, weight_base, weight_offset),                        \
+      CONST_TENSOR(int32_t, bias_base, bias_offset),                           \
+      CONST_TENSOR(int32_t, multiplier_base, multiplier_offset),               \
+      CONST_TENSOR(int8_t, shift_base, shift_offset),                          \
+      TENSOR(int8_t, output_base, output_offset),                              \
+      TENSOR(int8_t, scratch_base, scratch_offset)
+
+#define VMCU_SINGLE_BASES_VALID_NO_CONFIG                                      \
+  (input_base != NULL && weight_base != NULL && bias_base != NULL &&           \
+   multiplier_base != NULL && shift_base != NULL &&                            \
+   output_base != NULL && scratch_base != NULL)
+
 #endif /* ONELINER_VMCU_COMMON_H */

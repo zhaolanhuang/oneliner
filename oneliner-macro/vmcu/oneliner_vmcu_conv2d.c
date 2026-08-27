@@ -1,22 +1,56 @@
-/* Single 2D convolution segment kernel (any kernel/pad/stride/dilation). */
+/* Single 2D convolution segment kernel (any kernel/pad/stride/dilation).
+ *
+ * The same source is compiled two ways:
+ *  - generic: VMCU_SPECIALIZED undefined; every shape/zero point is read at
+ *    runtime from the config tensor (compiled into oneliner_vmcu_generic.bc);
+ *  - specialized: a generated wrapper defines VMCU_SPECIALIZED plus the
+ *    VMCU_N/IH/IW/CIN/... macros; the kernel is exported under
+ *    VMCU_ENTRY_NAME without the config argument (compile-time shapes).
+ */
 #include "oneliner_vmcu_common.h"
+
+#ifndef VMCU_C2_ENTRY
+#define VMCU_C2_ENTRY oneliner_vmcu_conv2d_s8
+#endif
+
+#define VMCU_C2_IDX_N 2
+#define VMCU_C2_IDX_IH 3
+#define VMCU_C2_IDX_IW 4
+#define VMCU_C2_IDX_CIN 5
+#define VMCU_C2_IDX_OH 6
+#define VMCU_C2_IDX_OW 7
+#define VMCU_C2_IDX_COUT 8
+#define VMCU_C2_IDX_KH 9
+#define VMCU_C2_IDX_KW 10
+#define VMCU_C2_IDX_SH 11
+#define VMCU_C2_IDX_SW 12
+#define VMCU_C2_IDX_DH 13
+#define VMCU_C2_IDX_DW 14
+#define VMCU_C2_IDX_PT 15
+#define VMCU_C2_IDX_PL 16
+#define VMCU_C2_IDX_INPUT_ZP 19
+#define VMCU_C2_IDX_OUTPUT_ZP 20
+
+#ifdef VMCU_SPECIALIZED
+#define VMCU_C2_DIM(field) ((size_t)VMCU_##field)
+#define VMCU_C2_ZP(field) VMCU_##field
+#else
+#define VMCU_C2_DIM(field) ((size_t)config[VMCU_C2_IDX_##field])
+#define VMCU_C2_ZP(field) config[VMCU_C2_IDX_##field]
+#endif
 
 static int oneliner_vmcu_conv2d_kernel(const int8_t *input, const int8_t *weight,
                          const int32_t *bias, const int32_t *multiplier,
-                         const int8_t *shift, const int32_t *config,
+                         const int8_t *shift,
+#ifdef VMCU_SPECIALIZED
                          int8_t *output, int8_t *scratch) {
+#else
+                         const int32_t *config, int8_t *output,
+                         int8_t *scratch) {
+#endif
   size_t n;
   size_t input_count;
   size_t output_count;
-
-
-
-
-
-
-
-
-
 
   size_t batches;
   size_t input_height;
@@ -37,31 +71,34 @@ static int oneliner_vmcu_conv2d_kernel(const int8_t *input, const int8_t *weight
   int32_t output_zero_point;
 
   if (input == NULL || weight == NULL || bias == NULL || multiplier == NULL ||
-      shift == NULL || config == NULL || output == NULL || scratch == NULL) {
+      shift == NULL ||
+#ifndef VMCU_SPECIALIZED
+      config == NULL ||
+#endif
+      output == NULL || scratch == NULL) {
     return 0;
   }
   if (((uintptr_t)bias % _Alignof(int32_t)) != 0U ||
-      ((uintptr_t)multiplier % _Alignof(int32_t)) != 0U ||
-      ((uintptr_t)config % _Alignof(int32_t)) != 0U) {
+      ((uintptr_t)multiplier % _Alignof(int32_t)) != 0U) {
     return 0;
   }
-  batches = (size_t)config[2];
-  input_height = (size_t)config[3];
-  input_width = (size_t)config[4];
-  input_channels = (size_t)config[5];
-  output_height = (size_t)config[6];
-  output_width = (size_t)config[7];
-  output_channels = (size_t)config[8];
-  kernel_height = (size_t)config[9];
-  kernel_width = (size_t)config[10];
-  stride_height = (size_t)config[11];
-  stride_width = (size_t)config[12];
-  dilation_height = (size_t)config[13];
-  dilation_width = (size_t)config[14];
-  pad_top = (size_t)config[15];
-  pad_left = (size_t)config[16];
-  input_zero_point = config[19];
-  output_zero_point = config[20];
+  batches = VMCU_C2_DIM(N);
+  input_height = VMCU_C2_DIM(IH);
+  input_width = VMCU_C2_DIM(IW);
+  input_channels = VMCU_C2_DIM(CIN);
+  output_height = VMCU_C2_DIM(OH);
+  output_width = VMCU_C2_DIM(OW);
+  output_channels = VMCU_C2_DIM(COUT);
+  kernel_height = VMCU_C2_DIM(KH);
+  kernel_width = VMCU_C2_DIM(KW);
+  stride_height = VMCU_C2_DIM(SH);
+  stride_width = VMCU_C2_DIM(SW);
+  dilation_height = VMCU_C2_DIM(DH);
+  dilation_width = VMCU_C2_DIM(DW);
+  pad_top = VMCU_C2_DIM(PT);
+  pad_left = VMCU_C2_DIM(PL);
+  input_zero_point = VMCU_C2_ZP(INPUT_ZP);
+  output_zero_point = VMCU_C2_ZP(OUTPUT_ZP);
 
   input_count = batches * input_height * input_width * input_channels;
   output_count = batches * output_height * output_width * output_channels;
@@ -155,9 +192,18 @@ static int oneliner_vmcu_conv2d_kernel(const int8_t *input, const int8_t *weight
   return 1;
 }
 
-void oneliner_vmcu_conv2d_s8(VMCU_SINGLE_ARGUMENTS) {
+#ifdef VMCU_SPECIALIZED
+void VMCU_C2_ENTRY(VMCU_SINGLE_ARGUMENTS_NO_CONFIG) {
+  if (!VMCU_SINGLE_BASES_VALID_NO_CONFIG) {
+    return;
+  }
+  (void)oneliner_vmcu_conv2d_kernel(VMCU_SINGLE_CALL_NO_CONFIG);
+}
+#else
+void VMCU_C2_ENTRY(VMCU_SINGLE_ARGUMENTS) {
   if (!VMCU_SINGLE_BASES_VALID) {
     return;
   }
   (void)oneliner_vmcu_conv2d_kernel(VMCU_SINGLE_CALL);
 }
+#endif

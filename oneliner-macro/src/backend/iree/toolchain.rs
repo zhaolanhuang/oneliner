@@ -139,6 +139,18 @@ fn run_vmcu_compile(
         ),
     };
     let cpu = target_cpu;
+    // thumbv7em: the default +dsp feature makes LLVM fuse the kernel MAC
+    // chains into smlabb (3 cycles, single-issue on Cortex-M4/M7); the vMCU
+    // kernels are faster with plain mla. The feature is synthesized once and
+    // flows through the same channel as the rustc-provided features, so the
+    // bitcode builds (clang) and the iree-compile invocations stay aligned.
+    let effective_features: Option<String> = match llvm_triple {
+        "thumbv7em-none-eabi" => match cpu_features {
+            Some(features) => Some(format!("{features},-dsp")),
+            None => Some("-dsp".to_owned()),
+        },
+        _ => cpu_features.map(str::to_owned),
+    };
     let preprocessing = artifact_dir.join(format!("{stem}.preprocessing.mlir"));
     let rewritten = artifact_dir.join(format!("{stem}.rewritten.mlir"));
     let configured = artifact_dir.join(format!("{stem}.configured.mlir"));
@@ -150,7 +162,7 @@ fn run_vmcu_compile(
     let rewriter = macro_dir.join("python").join(rewriter_name);
 
     let mut preprocess = Command::new("iree-compile");
-    configure_vmcu_target(&mut preprocess, compile_input, llvm_triple, cpu.as_deref(), cpu_features);
+    configure_vmcu_target(&mut preprocess, compile_input, llvm_triple, cpu.as_deref(), effective_features.as_deref());
     preprocess
         .arg("--compile-to=preprocessing")
         .arg("--emit-mlir-bytecode=false")
@@ -160,16 +172,17 @@ fn run_vmcu_compile(
     run_command(&mut preprocess, "IREE vMCU preprocessing")?;
 
     let plan_arg = plan.to_string_lossy().into_owned();
+    let artifact_arg = artifact_dir.to_string_lossy().into_owned();
     run_python_filter(
         &rewriter,
         &preprocessing,
         &rewritten,
-        &["--plan-output", &plan_arg],
+        &["--plan-output", &plan_arg, "--artifact-dir", &artifact_arg],
         "vMCU pointwise-pair rewriter",
     )?;
 
     let mut configure = Command::new("iree-compile");
-    configure_vmcu_target(&mut configure, &rewritten, llvm_triple, cpu.as_deref(), cpu_features);
+    configure_vmcu_target(&mut configure, &rewritten, llvm_triple, cpu.as_deref(), effective_features.as_deref());
     configure
         .arg("--compile-from=preprocessing")
         .arg("--compile-to=executable-configurations")
@@ -199,7 +212,7 @@ fn run_vmcu_compile(
     )?;
 
     let clang_path = std::env::var_os("CLANG").unwrap_or_else(|| "clang".into());
-    let mut clang = Command::new(clang_path);
+    let mut clang = Command::new(&clang_path);
     clang.arg(format!("--target={llvm_triple}"));
     if llvm_triple.starts_with("riscv") {
         clang.arg("-march=rv32imac");
@@ -213,7 +226,7 @@ fn run_vmcu_compile(
     // invocation: the rustc target features (e.g. riscv32imac "+m,+a,+c",
     // or a future "-dsp" for thumbv7em) are forwarded to clang as well so
     // the bitcode carries the same function-level target-features.
-    if let Some(features) = cpu_features {
+    if let Some(features) = effective_features.as_deref() {
         for feature in features.split(',') {
             if !feature.is_empty() {
                 clang.arg("-Xclang").arg("-target-feature").arg("-Xclang").arg(feature);
@@ -231,8 +244,65 @@ fn run_vmcu_compile(
         .arg(&bitcode);
     run_command(&mut clang, "vMCU pointwise bitcode builder")?;
 
+    let specialization_manifest = artifact_dir.join("vmcu-generic.specializations.json");
+    if specialization_manifest.is_file() {
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&specialization_manifest).map_err(|error| {
+                syn::Error::new(
+                    Span::call_site(),
+                    format!("failed to read vMCU specialization manifest: {error}"),
+                )
+            })?,
+        )
+        .map_err(|error| {
+            syn::Error::new(
+                Span::call_site(),
+                format!("invalid vMCU specialization manifest: {error}"),
+            )
+        })?;
+        let variants = manifest.get("variants").and_then(serde_json::Value::as_object).ok_or_else(|| {
+            syn::Error::new(Span::call_site(), "vMCU specialization manifest has no variants")
+        })?;
+        for (name, meta) in variants {
+            let source = meta.get("source").and_then(serde_json::Value::as_str).ok_or_else(|| {
+                syn::Error::new(Span::call_site(), format!("variant {name} has no source"))
+            })?;
+            let bitcode_name = meta.get("bitcode").and_then(serde_json::Value::as_str).ok_or_else(|| {
+                syn::Error::new(Span::call_site(), format!("variant {name} has no bitcode"))
+            })?;
+            let mut variant_clang = Command::new(&clang_path);
+            variant_clang.arg(format!("--target={llvm_triple}"));
+            if llvm_triple.starts_with("riscv") {
+                variant_clang.arg("-march=rv32imac");
+            } else {
+                variant_clang.arg("-mthumb");
+                if let Some(cpu) = cpu {
+                    variant_clang.arg(format!("-mcpu={cpu}"));
+                }
+            }
+            if let Some(features) = effective_features.as_deref() {
+                for feature in features.split(',') {
+                    if !feature.is_empty() {
+                        variant_clang.arg("-Xclang").arg("-target-feature").arg("-Xclang").arg(feature);
+                    }
+                }
+            }
+            variant_clang
+                .arg("-ffreestanding")
+                .arg("-fno-builtin")
+                .arg("-O3")
+                .arg("-emit-llvm")
+                .arg("-c")
+                .arg(format!("-I{}", macro_dir.join("vmcu").display()))
+                .arg(artifact_dir.join(source))
+                .arg("-o")
+                .arg(artifact_dir.join(bitcode_name));
+            run_command(&mut variant_clang, &format!("vMCU specialized bitcode builder ({name})"))?;
+        }
+    }
+
     let mut compile = Command::new("iree-compile");
-    configure_vmcu_target(&mut compile, &finalized, llvm_triple, cpu.as_deref(), cpu_features);
+    configure_vmcu_target(&mut compile, &finalized, llvm_triple, cpu.as_deref(), effective_features.as_deref());
     compile
         .arg("--compile-from=executable-configurations")
         .arg("--iree-opt-level=O3")
