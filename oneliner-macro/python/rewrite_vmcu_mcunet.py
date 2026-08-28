@@ -1398,12 +1398,34 @@ def _match_generic_in_context(context: ir.Context, module: ir.Module, text: str)
 
     for candidate_module in modules:
         internal = set(candidate_module.erase_operations)
+        keep = set()
         for candidate in candidate_module.erase_operations:
             for result in list(candidate.results):
                 for use in result.uses:
                     user = operation(use.owner)
                     if user not in internal and user not in consumed and result != candidate_module.output:
-                        raise ValueError(f"{candidate_module.kind} slice is not closed over SSA uses")
+                        keep.add(candidate)
+                        break
+        if keep:
+            # The slice shares a value with ops outside it (e.g. a linalg.fill
+            # accumulator buffer reused by several depthwise convs). Keep the
+            # shared op and everything it depends on inside the slice, so the
+            # external users still see a live SSA value after the rewrite.
+            changed = True
+            while changed:
+                changed = False
+                for candidate in list(keep):
+                    for operand in candidate.operands:
+                        owner = operation(operand.owner)
+                        if owner in internal and owner not in keep:
+                            keep.add(owner)
+                            changed = True
+        if keep:
+            candidate_module.erase_operations = tuple(
+                candidate
+                for candidate in candidate_module.erase_operations
+                if candidate not in keep
+            )
 
     if not modules:
         raise ValueError("no vMCU-compatible subgraphs found")
