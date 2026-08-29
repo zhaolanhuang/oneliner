@@ -120,7 +120,10 @@ fn normalize_dynamic_dims(path: &Path) -> syn::Result<()> {
     fs::write(path, normalized).map_err(|error| {
         syn::Error::new(
             Span::call_site(),
-            format!("failed to rewrite generated MLIR at {}: {error}", path.display()),
+            format!(
+                "failed to rewrite generated MLIR at {}: {error}",
+                path.display()
+            ),
         )
     })?;
     eprintln!(

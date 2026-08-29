@@ -15,6 +15,9 @@ pub fn assert_artifacts<M: ModelSource>(model_name: &str) {
         metadata_json_path,
         input_size,
         output_size,
+        io_pool_size,
+        input_offset,
+        output_offset,
         params_size,
         code_size,
         rodata_size,
@@ -41,6 +44,7 @@ pub fn assert_artifacts<M: ModelSource>(model_name: &str) {
         "{model_name}: total flash must equal params + code + rodata"
     );
     let _ = ram_size;
+    let _ = (io_pool_size, input_offset, output_offset);
 
     assert!(
         Path::new(model_path).exists(),

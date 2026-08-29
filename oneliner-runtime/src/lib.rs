@@ -18,7 +18,8 @@ pub use buffer::{
 
 pub use executor::{DefaultExecutor, Executor, SequentialExecutor, WorkItem};
 pub use interface::{
-    Error, ModelArtifacts, ModelInference, ModelSource, Shape, Tensor, Tensor4D, TensorArray,
+    Error, InPlaceModelInference, ModelArtifacts, ModelInference, ModelSource, Shape, Tensor,
+    Tensor4D, TensorArray, TensorView4, TensorViewMut4, VmcuIoBuffer,
 };
 #[cfg(feature = "iree-runtime")]
 pub use iree::{

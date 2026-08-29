@@ -85,6 +85,13 @@ class FillCommand:
 
 
 @dataclasses.dataclass
+class CopyCommand:
+    kind: str
+    source: TensorRange
+    target: TensorRange
+
+
+@dataclasses.dataclass
 class ConcurrentCommand:
     kind: str
     commands: list[Any]
@@ -390,6 +397,8 @@ def command_ranges(command: Any) -> list[TensorRange]:
         return command.ranges
     if isinstance(command, FillCommand):
         return [command.target]
+    if isinstance(command, CopyCommand):
+        return [command.source, command.target]
     if isinstance(command, ConcurrentCommand):
         ranges: list[TensorRange] = []
         for child in command.commands:
@@ -458,11 +467,28 @@ def source_line(operation: ir.Operation) -> int | None:
 
 
 @dataclasses.dataclass(frozen=True)
+class WorkloadDimension:
+    """One export count result before dispatch workload substitution."""
+
+    constant: int | None = None
+    argument_index: int | None = None
+
+    def resolve(self, arguments: list[int | None]) -> int | None:
+        """Resolves a constant or a count-block argument at one call site."""
+        if self.constant is not None:
+            return self.constant
+        if self.argument_index is None or self.argument_index >= len(arguments):
+            return None
+        return arguments[self.argument_index]
+
+
+@dataclasses.dataclass(frozen=True)
 class ExecutableExport:
     symbol_path: tuple[str, ...]
     ordinal: int
     local_ordinal: int
-    workload: tuple[int | None, ...]
+    workload: tuple[WorkloadDimension, ...]
+    workload_argument_count: int
 
 
 class StructuredStreamParser:
@@ -570,7 +596,14 @@ class StructuredStreamParser:
         return by_value
 
     def _find_exports(self) -> dict[tuple[str, ...], ExecutableExport]:
-        pending: list[tuple[tuple[str, ...], int, tuple[int | None, ...]]] = []
+        pending: list[
+            tuple[
+                tuple[str, ...],
+                int,
+                tuple[WorkloadDimension, ...],
+                int,
+            ]
+        ] = []
         seen_paths: set[tuple[str, ...]] = set()
         for operation in ir.get_ops_of_type(self.module, hal.ExecutableExportOp):
             path = self._export_path(operation)
@@ -598,11 +631,30 @@ class StructuredStreamParser:
                 raise StreamExtractionError(
                     f"executable export {'::'.join(path)} has no hal.return workload"
                 )
+            block_arguments = list(block.arguments)
+            if not block_arguments or str(block_arguments[0].type) != "!hal.device":
+                raise StreamExtractionError(
+                    f"executable export {'::'.join(path)} count block has no device argument"
+                )
+            workload_arguments = block_arguments[1:]
+
+            def parse_dimension(value: ir.Value) -> WorkloadDimension:
+                constant = resolve_ir_int(value)
+                if constant is not None:
+                    return WorkloadDimension(constant=constant)
+                for index, argument in enumerate(workload_arguments):
+                    if value == argument:
+                        return WorkloadDimension(argument_index=index)
+                # Keep unsupported count expressions explicit so the call-site
+                # diagnostic remains the existing "not static 3D" error.
+                return WorkloadDimension()
+
             pending.append(
                 (
                     path,
                     operation.ordinal.value,
-                    tuple(resolve_ir_int(value) for value in terminator.operands),
+                    tuple(parse_dimension(value) for value in terminator.operands),
+                    len(workload_arguments),
                 )
             )
 
@@ -611,7 +663,14 @@ class StructuredStreamParser:
         # ordinal, not the variant-local hal.executable.export ordinal.
         groups: dict[
             tuple[str, ...],
-            list[tuple[tuple[str, ...], int, tuple[int | None, ...]]],
+            list[
+                tuple[
+                    tuple[str, ...],
+                    int,
+                    tuple[WorkloadDimension, ...],
+                    int,
+                ]
+            ],
         ] = {}
         for item in pending:
             path = item[0]
@@ -630,12 +689,13 @@ class StructuredStreamParser:
                     "executable "
                     f"{'::'.join(executable_path)} has non-contiguous or duplicate ordinals"
                 )
-            for path, local_ordinal, workload in items:
+            for path, local_ordinal, workload, workload_argument_count in items:
                 exports[path] = ExecutableExport(
                     symbol_path=path,
                     ordinal=base_ordinal + local_ordinal,
                     local_ordinal=local_ordinal,
                     workload=workload,
+                    workload_argument_count=workload_argument_count,
                 )
             base_ordinal += len(items)
         return exports
@@ -754,7 +814,7 @@ class StructuredStreamParser:
         unsupported_roles = [
             binding
             for binding in bindings
-            if binding.role not in {"constant", "temporary", "input", "output"}
+            if binding.role not in {"constant", "temporary", "input", "output", "inout"}
         ]
         if unsupported_roles:
             rendered = ", ".join(
@@ -781,6 +841,8 @@ class StructuredStreamParser:
                 commands.append(self._parse_dispatch(operation))
             elif name == "stream.cmd.fill":
                 commands.append(self._parse_fill(operation))
+            elif name == "stream.cmd.copy":
+                commands.append(self._parse_copy(operation))
             elif name == "stream.cmd.concurrent":
                 if len(operation.body.blocks) != 1:
                     raise StreamExtractionError(
@@ -807,8 +869,18 @@ class StructuredStreamParser:
             )
         symbol_path = tuple(operation.entry_points[0].value)
         export = self._lookup_export(symbol_path, operation.operation)
-        if len(export.workload) != 3 or any(
-            value is None for value in export.workload
+        workload_operands = list(operation.workload)
+        if len(workload_operands) != export.workload_argument_count:
+            raise StreamExtractionError(
+                f"dispatch workload arity for {'::'.join(symbol_path)} does not "
+                "match its executable export"
+            )
+        workload_arguments = [resolve_ir_int(value) for value in workload_operands]
+        resolved_workload = tuple(
+            dimension.resolve(workload_arguments) for dimension in export.workload
+        )
+        if len(resolved_workload) != 3 or any(
+            value is None for value in resolved_workload
         ):
             raise StreamExtractionError(
                 f"dispatch workload for {'::'.join(symbol_path)} is not static 3D"
@@ -865,7 +937,7 @@ class StructuredStreamParser:
             params=params,
             param_values=param_values,
             ranges=ranges,
-            workload=export.workload,
+            workload=resolved_workload,
         )
 
     def _parse_fill(self, operation: stream.CmdFillOp) -> FillCommand:
@@ -902,6 +974,36 @@ class StructuredStreamParser:
             ),
         )
 
+    def _parse_copy(self, operation: stream.CmdCopyOp) -> CopyCommand:
+        source_offset = resolve_ir_int(operation.source_offset)
+        target_offset = resolve_ir_int(operation.target_offset)
+        length = resolve_ir_int(operation.length)
+        if source_offset is None or target_offset is None or length is None:
+            raise StreamExtractionError("dynamic stream copy ranges are unsupported")
+        return CopyCommand(
+            kind="copy",
+            source=TensorRange(
+                access="ro",
+                arg=value_name(operation.source),
+                kind=resource_kind(operation.source),
+                tensor_name="",
+                offset_expr=value_name(operation.source_offset),
+                offset=source_offset,
+                length_expr=value_name(operation.length),
+                length=length,
+            ),
+            target=TensorRange(
+                access="wo",
+                arg=value_name(operation.target),
+                kind=resource_kind(operation.target),
+                tensor_name="",
+                offset_expr=value_name(operation.target_offset),
+                offset=target_offset,
+                length_expr=value_name(operation.length),
+                length=length,
+            ),
+        )
+
     def parse(self) -> tuple[list[CmdExecute], dict[str, ConstantBlob]]:
         executes = [
             self._parse_execute(operation, index)
@@ -914,6 +1016,117 @@ class StructuredStreamParser:
 
 def parse_cmd_executes(text: str) -> tuple[list[CmdExecute], dict[str, ConstantBlob]]:
     return StructuredStreamParser(text).parse()
+
+
+def load_compact_plan(path: Path) -> dict[str, Any]:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if document.get("schema_version") != 4:
+        raise StreamExtractionError("compact vMCU conversion requires plan schema v4")
+    compact = document.get("compact_graph")
+    if not isinstance(compact, dict):
+        raise StreamExtractionError("vMCU plan has no compact_graph")
+    return compact
+
+
+def _collapse_commands_to_pool(
+    commands: list[Any], input_arg: str, output_arg: str, pool_name: str, pool_size: int
+) -> tuple[list[Any], int]:
+    collapsed: list[Any] = []
+    removed_copies = 0
+    for command in commands:
+        if isinstance(command, CopyCommand):
+            if (
+                command.source.arg == input_arg
+                and command.target.arg == output_arg
+                and command.source.offset == 0
+                and command.target.offset == 0
+                and command.source.length == pool_size
+                and command.target.length == pool_size
+            ):
+                removed_copies += 1
+                continue
+        if isinstance(command, ConcurrentCommand):
+            command.commands, child_count = _collapse_commands_to_pool(
+                command.commands, input_arg, output_arg, pool_name, pool_size
+            )
+            removed_copies += child_count
+        for item in command_ranges(command):
+            if item.arg in {input_arg, output_arg}:
+                item.arg = input_arg
+                item.tensor_name = pool_name
+        collapsed.append(command)
+    return collapsed, removed_copies
+
+
+def collapse_compact_io_pool(
+    executes: list[CmdExecute], compact: dict[str, Any]
+) -> None:
+    pool_size = compact.get("allocated_pool_bytes")
+    if not isinstance(pool_size, int) or pool_size <= 0:
+        raise StreamExtractionError("invalid compact_graph allocated_pool_bytes")
+    removed_copies = 0
+    already_in_place = 0
+    for execute in executes:
+        inputs = [
+            item
+            for item in execute.resources
+            if item.kind == "external" and item.role == "input" and item.size == pool_size
+        ]
+        outputs = [
+            item
+            for item in execute.resources
+            if item.kind == "external" and item.role == "output" and item.size == pool_size
+        ]
+        if len(inputs) == 1 and not outputs:
+            input_binding = inputs[0]
+            pool_ranges = [
+                item
+                for command in execute.commands
+                for item in command_ranges(command)
+                if item.arg == input_binding.arg
+            ]
+            if not pool_ranges or not any(item.access in {"wo", "rw"} for item in pool_ranges):
+                raise StreamExtractionError(
+                    "single compact pool resource is not written by the execute"
+                )
+            if any(
+                item.offset is None
+                or item.length is None
+                or item.offset < 0
+                or item.offset + item.length > pool_size
+                for item in pool_ranges
+            ):
+                raise StreamExtractionError(
+                    "single compact pool resource has an out-of-range access"
+                )
+            input_binding.role = "inout"
+            pool_name = binding_name(input_binding)
+            for item in pool_ranges:
+                item.tensor_name = pool_name
+            already_in_place += 1
+            continue
+        if len(inputs) != 1 or len(outputs) != 1:
+            raise StreamExtractionError(
+                "compact Stream must expose one pool-sized in-place resource or one input/output pair"
+            )
+        input_binding, output_binding = inputs[0], outputs[0]
+        input_binding.role = "inout"
+        pool_name = binding_name(input_binding)
+        execute.commands, count = _collapse_commands_to_pool(
+            execute.commands,
+            input_binding.arg,
+            output_binding.arg,
+            pool_name,
+            pool_size,
+        )
+        removed_copies += count
+        execute.resources = [
+            item for item in execute.resources if item is not output_binding
+        ]
+    if removed_copies + already_in_place != len(executes):
+        raise StreamExtractionError(
+            "compact Stream pool folding did not cover every execute"
+        )
 
 
 def bytes_to_rust_array(data: bytes, indent: str = "    ", per_line: int = 16) -> list[str]:
@@ -984,6 +1197,8 @@ def render_tensor_range(
         storage = "input"
     elif role == "output":
         storage = "output"
+    elif role == "inout":
+        storage = "io_pool"
     else:
         storage = f"(*{storage_name}).to_buffer_ref()"
     return (
@@ -1023,6 +1238,8 @@ def render_command(
             raise StreamExtractionError(f"unresolved fill value {command.value_expr}")
         rendered = render_tensor_range(command.target, workspace_names, external_roles)
         out.append(f"{indent}unsafe {{ fill({rendered}, {command.value})?; }}")
+    elif isinstance(command, CopyCommand):
+        raise StreamExtractionError("non-vMCU stream.cmd.copy is unsupported")
     elif isinstance(command, ConcurrentCommand):
         out.append(f"{indent}concurrent(|| {{")
         for child in command.commands:
@@ -1053,12 +1270,12 @@ def render_rust(executes: list[CmdExecute], constant_blobs: dict[str, ConstantBl
     constant_bindings = [binding for binding in bindings if binding.role == "constant"]
     workspace_bindings = [binding for binding in bindings if binding.role == "temporary"]
     external_bindings = [
-        binding for binding in bindings if binding.role in {"input", "output"}
+        binding for binding in bindings if binding.role in {"input", "output", "inout"}
     ]
     unsupported_bindings = [
         binding
         for binding in bindings
-        if binding.role not in {"constant", "temporary", "input", "output"}
+        if binding.role not in {"constant", "temporary", "input", "output", "inout"}
     ]
     if unsupported_bindings:
         raise StreamExtractionError(
@@ -1096,10 +1313,17 @@ def render_rust(executes: list[CmdExecute], constant_blobs: dict[str, ConstantBl
     out.append("")
 
     for execute in executes:
+        inout_count = sum(item.role == "inout" for item in execute.resources)
+        if inout_count:
+            if inout_count != 1 or any(
+                item.role in {"input", "output"} for item in execute.resources
+            ):
+                raise StreamExtractionError("in-place execute must expose one external pool")
+            signature = "workspace: &mut Workspace, io_pool: BufferMut"
+        else:
+            signature = "workspace: &mut Workspace, input: Buffer, output: BufferMut"
         out.append(
-            f"pub fn {rust_ident(execute.name)}("
-            "workspace: &mut Workspace, input: Buffer, output: BufferMut) "
-            "-> Result<(), Error> {"
+            f"pub fn {rust_ident(execute.name)}({signature}) -> Result<(), Error> {{"
         )
         if execute.line_no is not None:
             out.append(f"    // source MLIR line: {execute.line_no}")
@@ -1134,9 +1358,11 @@ def dataclass_to_json(value: Any) -> Any:
     return value
 
 
-def render_metadata_json(executes: list[CmdExecute]) -> str:
+def render_metadata_json(
+    executes: list[CmdExecute], compact: dict[str, Any] | None = None
+) -> str:
     document = {
-        "schema_version": 1,
+        "schema_version": 2 if compact is not None else 1,
         "cmd_executes": [
             {
                 "name": execute.name,
@@ -1153,6 +1379,34 @@ def render_metadata_json(executes: list[CmdExecute]) -> str:
             for execute in executes
         ],
     }
+    if compact is not None:
+        tensors = compact.get("tensors", [])
+        placements = {
+            item["tensor"]: item for item in compact.get("placements", [])
+        }
+        inputs = [item for item in tensors if item.get("is_graph_input")]
+        outputs = [item for item in tensors if item.get("is_graph_output")]
+        if len(inputs) != 1 or len(outputs) != 1:
+            raise StreamExtractionError("compact plan must have one input and one output")
+        input_tensor, output_tensor = inputs[0], outputs[0]
+        input_placement = placements.get(input_tensor["name"])
+        output_placement = placements.get(output_tensor["name"])
+        if input_placement is None or output_placement is None:
+            raise StreamExtractionError("compact I/O tensor placement is missing")
+        document["io_pool"] = {
+            "logical_bytes": compact["logical_pool_bytes"],
+            "allocated_bytes": compact["allocated_pool_bytes"],
+            "input_view": {
+                "offset": input_placement["base"],
+                "size": input_tensor["size_bytes"],
+                "shape": input_tensor["shape"],
+            },
+            "output_view": {
+                "offset": output_placement["base"],
+                "size": output_tensor["size_bytes"],
+                "shape": output_tensor["shape"],
+            },
+        }
     return json.dumps(document, indent=2) + "\n"
 
 
@@ -1163,6 +1417,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--format", choices=("rust", "json"), default="rust")
     parser.add_argument("--rust-output", type=Path, help="Write generated Rust to this file")
     parser.add_argument("--json-output", type=Path, help="Write generated metadata JSON to this file")
+    parser.add_argument(
+        "--vmcu-plan", type=Path, help="Schema v4 plan used to collapse tied external I/O"
+    )
     args = parser.parse_args(argv)
 
     if args.output and (args.rust_output or args.json_output):
@@ -1171,13 +1428,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         text = args.input.read_text(encoding="utf-8")
         executes, constant_blobs = parse_cmd_executes(text)
+        compact = load_compact_plan(args.vmcu_plan) if args.vmcu_plan else None
+        if compact is not None:
+            collapse_compact_io_pool(executes, compact)
         rust_rendered = render_rust(executes, constant_blobs)
 
         if args.rust_output or args.json_output:
             if args.rust_output:
                 args.rust_output.write_text(rust_rendered, encoding="utf-8")
             if args.json_output:
-                args.json_output.write_text(render_metadata_json(executes), encoding="utf-8")
+                args.json_output.write_text(
+                    render_metadata_json(executes, compact), encoding="utf-8"
+                )
             return 0
 
         rendered = (

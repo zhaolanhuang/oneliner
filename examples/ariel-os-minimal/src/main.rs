@@ -6,29 +6,29 @@ use ariel_os::log::{error, info};
 use ariel_os::time;
 
 use oneliner::model;
-use oneliner::runtime::{ModelInference, ModelSource};
+use oneliner::runtime::{InPlaceModelInference, ModelSource};
 
-use static_cell::ConstStaticCell;
-
-// #[model(
-//     "../models/mcunet-10fps_vww.tflite",
-//     arena = "shared"
-// )]
-// struct Model;
-// const INPUT_LEN: usize = 64 * 64 * 3;
-// const EXPECTED: [i8; 2] = [4, -5];
-
-#[model("../models/lenet5_quantized.tflite")]
+#[model(
+    "../models/mcunet-10fps_vww.tflite",
+    arena = "shared",
+    vmcu = "auto",
+    vmcu_schedule = "greedy",
+    // vmcu_search_states = 1_000_000
+)]
 struct Model;
-const INPUT_LEN: usize = 28 * 28 * 1;
-const OUTPUT_LEN: usize = 10;
-const EXPECTED: [f32; OUTPUT_LEN] = [
-    0.11666615, 0.11666615, 0.13124943, 0.68541366, 0.0, 0.36458173, 0.0, 0.0, 1.2104113,
-    0.16041596,
-];
+const EXPECTED: [i8; 2] = [4, -5];
+
+// #[model("../models/lenet5_quantized.tflite", vmcu = "auto")]
+// struct Model;
+// const INPUT_LEN: usize = 28 * 28 * 1;
+// const OUTPUT_LEN: usize = 10;
+// const EXPECTED: [f32; OUTPUT_LEN] = [
+//     0.11666615, 0.11666615, 0.13124943, 0.68541366, 0.0, 0.36458173, 0.0, 0.0, 1.2104113,
+//     0.16041596,
+// ];
 // static INPUT_CELL: ConstStaticCell<<Model as ModelInference>::InputTensor> = ConstStaticCell::new(<Model as ModelInference>::InputTensor::new(0));
 
-#[ariel_os::thread(autostart, priority = 1, stacksize=20480)]
+#[ariel_os::thread(autostart, priority = 1, stacksize = 20480)]
 // #[ariel_os::thread(autostart, priority = 1)]
 fn main() {
     let artifacts = <Model as ModelSource>::ARTIFACTS;
@@ -42,11 +42,13 @@ fn main() {
     );
 
     let mut model = Model::new();
-    let mut input = Model::create_input_tensor();
-    // let mut input = INPUT_CELL.take();
-    input.fill(7.0);
+    let mut io_pool = Model::create_io_buffer();
+    {
+        let mut input = Model::input_view_mut(&mut io_pool);
+        input.fill(7);
+    }
     let time_begin_us = time::Instant::now().as_micros();
-    let output = model.run(&input);
+    let output = model.run_in_place(&mut io_pool);
     let time_end_us = time::Instant::now().as_micros();
     info!("Model inference time: {:?} us", time_end_us - time_begin_us);
 

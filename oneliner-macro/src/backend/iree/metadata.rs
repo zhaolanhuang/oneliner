@@ -12,15 +12,37 @@ pub(super) struct FlowMetadata {
     pub execute_fns: Vec<Ident>,
     pub input: Option<BindingArtifact>,
     pub output: BindingArtifact,
+    pub io_pool: Option<CompactIoMetadata>,
     /// Deduplicated constant/weight bytes placed in flash.
     pub params_size: usize,
     /// Deduplicated transient workspace bytes held in RAM.
     pub ram_size: usize,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct CompactIoMetadata {
+    pub allocated_bytes: usize,
+    pub input_offset: usize,
+    pub output_offset: usize,
+}
+
 #[derive(Deserialize)]
 struct Metadata {
     cmd_executes: Vec<Execute>,
+    io_pool: Option<IoPool>,
+}
+
+#[derive(Deserialize)]
+struct IoPool {
+    allocated_bytes: usize,
+    input_view: IoView,
+    output_view: IoView,
+}
+
+#[derive(Deserialize)]
+struct IoView {
+    offset: usize,
+    size: usize,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +65,7 @@ enum Role {
     Output,
     Constant,
     Temporary,
+    Inout,
     #[serde(other)]
     Other,
 }
@@ -63,17 +86,45 @@ pub(super) fn load_metadata(path: &Path) -> syn::Result<FlowMetadata> {
         .iter()
         .flat_map(|execute| execute.resources.iter())
         .collect();
-    let input = resources
-        .iter()
-        .find(|resource| resource.role == Role::Input)
-        .and_then(|resource| resource.size)
-        .map(|size| BindingArtifact { size });
-    let output = resources
-        .iter()
-        .find(|resource| resource.role == Role::Output)
-        .and_then(|resource| resource.size)
-        .map(|size| BindingArtifact { size })
-        .unwrap();
+    let (input, output, io_pool) = if let Some(pool) = metadata.io_pool {
+        let binding_size = resources
+            .iter()
+            .find(|resource| resource.role == Role::Inout)
+            .and_then(|resource| resource.size)
+            .ok_or_else(|| syn::Error::new(Span::call_site(), "missing vMCU inout pool"))?;
+        if binding_size != pool.allocated_bytes {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "vMCU plan and Flow inout pool sizes differ",
+            ));
+        }
+        (
+            Some(BindingArtifact {
+                size: pool.input_view.size,
+            }),
+            BindingArtifact {
+                size: pool.output_view.size,
+            },
+            Some(CompactIoMetadata {
+                allocated_bytes: pool.allocated_bytes,
+                input_offset: pool.input_view.offset,
+                output_offset: pool.output_view.offset,
+            }),
+        )
+    } else {
+        let input = resources
+            .iter()
+            .find(|resource| resource.role == Role::Input)
+            .and_then(|resource| resource.size)
+            .map(|size| BindingArtifact { size });
+        let output = resources
+            .iter()
+            .find(|resource| resource.role == Role::Output)
+            .and_then(|resource| resource.size)
+            .map(|size| BindingArtifact { size })
+            .ok_or_else(|| syn::Error::new(Span::call_site(), "missing output binding"))?;
+        (input, output, None)
+    };
 
     let (params_size, ram_size) = footprint_sizes(resources.iter().copied());
 
@@ -81,6 +132,7 @@ pub(super) fn load_metadata(path: &Path) -> syn::Result<FlowMetadata> {
         execute_fns,
         input,
         output,
+        io_pool,
         params_size,
         ram_size,
     })
@@ -170,13 +222,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert_eq!(
-            value.cmd_executes[0].resources[0].role,
-            Role::Constant
-        );
-        assert_eq!(
-            value.cmd_executes[0].resources[1].role,
-            Role::Temporary
-        );
+        assert_eq!(value.cmd_executes[0].resources[0].role, Role::Constant);
+        assert_eq!(value.cmd_executes[0].resources[1].role, Role::Temporary);
     }
 }

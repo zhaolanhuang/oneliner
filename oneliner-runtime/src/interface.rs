@@ -18,6 +18,122 @@ pub struct Tensor4D<T, const D1: usize, const D2: usize, const D3: usize, const 
 pub type Tensor<T, const D1: usize, const D2: usize, const D3: usize, const D4: usize> =
     Tensor4D<T, D1, D2, D3, D4>;
 
+/// One aligned byte pool shared by a vMCU model's logical input, activations,
+/// and logical output.
+pub struct VmcuIoBuffer<const N: usize> {
+    storage: Aligned<AlignedType, [u8; N]>,
+}
+
+impl<const N: usize> VmcuIoBuffer<N> {
+    pub const LEN: usize = N;
+
+    pub const fn new(value: u8) -> Self {
+        Self {
+            storage: Aligned([value; N]),
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.storage[..]
+    }
+
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.storage[..]
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.as_bytes_mut().as_mut_ptr()
+    }
+
+    pub const fn len(&self) -> usize {
+        N
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        N == 0
+    }
+}
+
+/// Borrowed immutable rank-4 tensor view into a vMCU I/O pool.
+pub struct TensorView4<'a, T, const D1: usize, const D2: usize, const D3: usize, const D4: usize> {
+    slice: &'a [T],
+}
+
+impl<'a, T, const D1: usize, const D2: usize, const D3: usize, const D4: usize>
+    TensorView4<'a, T, D1, D2, D3, D4>
+{
+    pub const LEN: usize = D1 * D2 * D3 * D4;
+    pub const SHAPE: Shape = (D1, D2, D3, D4);
+
+    pub fn from_bytes(bytes: &'a [u8]) -> Self {
+        let byte_len = Self::LEN * core::mem::size_of::<T>();
+        assert_eq!(bytes.len(), byte_len, "tensor view byte length mismatch");
+        assert_eq!(
+            bytes.as_ptr().align_offset(core::mem::align_of::<T>()),
+            0,
+            "tensor view alignment mismatch"
+        );
+        // SAFETY: length and alignment were checked and the borrow of `bytes`
+        // outlives the returned view.
+        let slice = unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<T>(), Self::LEN) };
+        Self { slice }
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        self.slice
+    }
+
+    pub const fn dim(&self) -> Shape {
+        Self::SHAPE
+    }
+}
+
+/// Borrowed mutable rank-4 tensor view into a vMCU I/O pool.
+pub struct TensorViewMut4<'a, T, const D1: usize, const D2: usize, const D3: usize, const D4: usize>
+{
+    slice: &'a mut [T],
+}
+
+impl<'a, T, const D1: usize, const D2: usize, const D3: usize, const D4: usize>
+    TensorViewMut4<'a, T, D1, D2, D3, D4>
+{
+    pub const LEN: usize = D1 * D2 * D3 * D4;
+    pub const SHAPE: Shape = (D1, D2, D3, D4);
+
+    pub fn from_bytes(bytes: &'a mut [u8]) -> Self {
+        let byte_len = Self::LEN * core::mem::size_of::<T>();
+        assert_eq!(bytes.len(), byte_len, "tensor view byte length mismatch");
+        assert_eq!(
+            bytes.as_ptr().align_offset(core::mem::align_of::<T>()),
+            0,
+            "tensor view alignment mismatch"
+        );
+        // SAFETY: length, exclusive access, and alignment were checked.
+        let slice =
+            unsafe { core::slice::from_raw_parts_mut(bytes.as_mut_ptr().cast::<T>(), Self::LEN) };
+        Self { slice }
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        self.slice
+    }
+
+    pub fn as_slice_mut(&mut self) -> &mut [T] {
+        self.slice
+    }
+
+    pub fn fill(&mut self, value: T)
+    where
+        T: Clone,
+    {
+        self.slice.fill(value);
+    }
+
+    pub const fn dim(&self) -> Shape {
+        Self::SHAPE
+    }
+}
+
 impl<T, const D1: usize, const D2: usize, const D3: usize, const D4: usize>
     Tensor4D<T, D1, D2, D3, D4>
 {
@@ -119,6 +235,21 @@ pub trait ModelInference {
     fn create_input_tensor() -> Self::InputTensor;
 }
 
+/// In-place inference over one compact vMCU activation/I/O pool.
+pub trait InPlaceModelInference {
+    type IoBuffer;
+    type InputViewMut<'a>
+    where
+        Self: 'a;
+    type OutputView<'a>
+    where
+        Self: 'a;
+
+    fn create_io_buffer() -> Self::IoBuffer;
+    fn input_view_mut<'a>(pool: &'a mut Self::IoBuffer) -> Self::InputViewMut<'a>;
+    fn run_in_place<'a>(&mut self, pool: &'a mut Self::IoBuffer) -> Self::OutputView<'a>;
+}
+
 /// Metadata exposed by a model generated with `#[model]`.
 ///
 /// Input: no runtime input; metadata is provided as associated constants.
@@ -218,6 +349,12 @@ pub struct ModelArtifacts {
     pub input_size: usize,
     /// Size in bytes of the model's single output tensor.
     pub output_size: usize,
+    /// Aligned compact I/O pool bytes, or zero for the immutable tensor ABI.
+    pub io_pool_size: usize,
+    /// Byte offset of the logical input view in the I/O pool.
+    pub input_offset: usize,
+    /// Byte offset of the logical output view in the I/O pool.
+    pub output_offset: usize,
     /// Model parameter/weight bytes placed in flash (read-only model data).
     pub params_size: usize,
     /// Machine code bytes of the compiled model placed in flash.
@@ -229,4 +366,22 @@ pub struct ModelArtifacts {
     pub total_flash_size: usize,
     /// Transient workspace bytes held in RAM during inference.
     pub ram_size: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_pool_views_borrow_selected_ranges() {
+        let mut pool = VmcuIoBuffer::<64>::new(0);
+        {
+            let mut input =
+                TensorViewMut4::<i8, 1, 1, 1, 4>::from_bytes(&mut pool.as_bytes_mut()[8..12]);
+            input.fill(-3);
+        }
+        let output = TensorView4::<i8, 1, 1, 1, 4>::from_bytes(&pool.as_bytes()[8..12]);
+        assert_eq!(output.as_slice(), &[-3; 4]);
+        assert_eq!(output.dim(), (1, 1, 1, 4));
+    }
 }

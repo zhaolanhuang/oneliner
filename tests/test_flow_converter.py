@@ -13,6 +13,17 @@ SCRIPT = (
     / "iree_stream_flow_to_rust.py"
 )
 FIXTURE = Path(__file__).parent / "fixtures" / "abs2.10.executable-targets.mlir"
+REAL_VMCU_DUMP = (
+    Path(__file__).parents[1]
+    / "examples"
+    / "ariel-os-minimal"
+    / "target"
+    / "oneliner"
+    / "model_iree_mcunet_10fps_vww"
+    / "iree-ir-dumps"
+    / "vmcu_rewritten.10.executable-targets.mlir"
+)
+REAL_VMCU_PLAN = REAL_VMCU_DUMP.parents[1] / "vmcu.plan.json"
 DISPATCH = """      stream.cmd.dispatch @main_dispatch_0::@static::@main_dispatch_0_elementwise_2_f32 {
         ro %arg1[%c0 for %c8] : !stream.resource<external>{%c8},
         wo %arg2[%c0 for %c8] : !stream.resource<external>{%c8}
@@ -21,6 +32,23 @@ SPEC = importlib.util.spec_from_file_location("oneliner_flow_converter", SCRIPT)
 CONVERTER = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = CONVERTER
 SPEC.loader.exec_module(CONVERTER)
+
+
+def with_parameterized_workload(text: str, operand: str) -> str:
+    """Changes the fixture export to derive all 3D counts from one operand."""
+    old_count = """count(%arg0: !hal.device) -> (index, index, index) {
+        %c1 = arith.constant 1 : index
+        %c1_0 = arith.constant 1 : index
+        %c1_1 = arith.constant 1 : index
+        hal.return %c1, %c1_0, %c1_1 : index, index, index
+      }"""
+    new_count = """count(%arg0: !hal.device, %arg1: index) -> (index, index, index) {
+        hal.return %arg1, %arg1, %arg1 : index, index, index
+      }"""
+    if old_count not in text or DISPATCH not in text:
+        raise AssertionError("flow converter fixture no longer has the expected shape")
+    dispatch = DISPATCH.replace(" {", f"[{operand}] {{", 1)
+    return text.replace(old_count, new_count, 1).replace(DISPATCH, dispatch, 1)
 
 
 class FlowConverterTests(unittest.TestCase):
@@ -59,20 +87,101 @@ class FlowConverterTests(unittest.TestCase):
         ):
             CONVERTER.parse_cmd_executes(text)
 
+    def test_structured_parser_substitutes_static_workload_arguments(self):
+        text = FIXTURE.read_text(encoding="utf-8").replace(
+            "    %c0 = arith.constant 0 : index",
+            "    %c1 = arith.constant 1 : index\n"
+            "    %c0 = arith.constant 0 : index",
+            1,
+        )
+        text = with_parameterized_workload(text, "%c1")
+
+        executes, _ = CONVERTER.parse_cmd_executes(text)
+        dispatch = executes[0].commands[0]
+
+        self.assertEqual(dispatch.workload, (1, 1, 1))
+        self.assertEqual(dispatch.params, [])
+        self.assertEqual(dispatch.param_values, [])
+
+    def test_structured_parser_rejects_dynamic_workload_arguments(self):
+        text = FIXTURE.read_text(encoding="utf-8").replace(
+            "@main(%arg0: !hal.buffer_view)",
+            "@main(%arg0: !hal.buffer_view, %dynamic: index)",
+            1,
+        )
+        text = with_parameterized_workload(text, "%dynamic")
+
+        with self.assertRaisesRegex(
+            CONVERTER.StreamExtractionError, "is not static 3D"
+        ):
+            CONVERTER.parse_cmd_executes(text)
+
+    @unittest.skipUnless(
+        REAL_VMCU_DUMP.is_file(), "the checked-in MCUNet executable dump is required"
+    )
+    def test_real_vmcu_workloads_are_substituted_at_dispatch_sites(self):
+        executes, _ = CONVERTER.parse_cmd_executes(
+            REAL_VMCU_DUMP.read_text(encoding="utf-8")
+        )
+
+        def dispatches(commands):
+            for command in commands:
+                if isinstance(command, CONVERTER.DispatchCall):
+                    yield command
+                elif isinstance(command, CONVERTER.ConcurrentCommand):
+                    yield from dispatches(command.commands)
+
+        all_dispatches = [
+            command
+            for execute in executes
+            for command in dispatches(execute.commands)
+        ]
+        vmcu_ordinals = {7, 9, 10, 12, 14, 15, 20, 21}
+        vmcu_dispatches = [
+            command for command in all_dispatches if command.ordinal in vmcu_ordinals
+        ]
+
+        self.assertEqual(len(vmcu_dispatches), 8)
+        self.assertTrue(
+            all(command.workload == (1, 1, 1) for command in vmcu_dispatches)
+        )
+        self.assertTrue(all(command.param_values == [] for command in vmcu_dispatches))
+
     def test_structured_parser_rejects_unknown_commands(self):
         text = FIXTURE.read_text(encoding="utf-8")
-        copy = (
-            '      "stream.cmd.copy"(%arg1, %c8, %c0, %arg2, %c8, %c0, %c8) '
-            ": (!stream.resource<external>, index, index, "
-            "!stream.resource<external>, index, index, index) -> ()"
+        discard = (
+            '      "stream.cmd.discard"(%arg2, %c8, %c0, %c8) '
+            ": (!stream.resource<external>, index, index, index) -> ()"
         )
         self.assertIn(DISPATCH, text)
 
         with self.assertRaisesRegex(
             CONVERTER.StreamExtractionError,
-            "unsupported command operation stream.cmd.copy",
+            "unsupported command operation stream.cmd.discard",
         ):
-            CONVERTER.parse_cmd_executes(text.replace(DISPATCH, copy, 1))
+            CONVERTER.parse_cmd_executes(text.replace(DISPATCH, discard, 1))
+
+    @unittest.skipUnless(
+        REAL_VMCU_DUMP.is_file() and REAL_VMCU_PLAN.is_file(),
+        "real vMCU Flow dump and schema-v4 plan are required",
+    )
+    def test_compact_io_collapses_external_copy_to_one_inout_pool(self):
+        executes, constants = CONVERTER.parse_cmd_executes(
+            REAL_VMCU_DUMP.read_text(encoding="utf-8")
+        )
+        compact = CONVERTER.load_compact_plan(REAL_VMCU_PLAN)
+        CONVERTER.collapse_compact_io_pool(executes, compact)
+        external = [
+            item
+            for execute in executes
+            for item in execute.resources
+            if item.kind == "external"
+        ]
+        self.assertEqual([(item.role, item.size) for item in external], [("inout", 16960)])
+        self.assertNotIn("CopyCommand", repr(executes))
+        rendered = CONVERTER.render_rust(executes, constants)
+        self.assertIn("io_pool: BufferMut", rendered)
+        self.assertNotIn("input: Buffer, output: BufferMut", rendered)
 
     def test_structured_parser_parses_concurrent_fill(self):
         text = FIXTURE.read_text(encoding="utf-8").replace(

@@ -23,10 +23,9 @@ pub(super) struct ObjectFootprint {
 /// library tables and `.ARM.exidx` unwind tables are counted as read-only data
 /// because they are emitted into flash alongside the parameters.
 pub(super) fn measure_object(object_path: &Path) -> syn::Result<ObjectFootprint> {
-    let bytes = fs::read(object_path)
-        .map_err(|error| syn::Error::new(Span::call_site(), error))?;
-    let file = object::File::parse(&*bytes)
-        .map_err(|error| syn::Error::new(Span::call_site(), error))?;
+    let bytes = fs::read(object_path).map_err(|error| syn::Error::new(Span::call_site(), error))?;
+    let file =
+        object::File::parse(&*bytes).map_err(|error| syn::Error::new(Span::call_site(), error))?;
 
     let mut code_size = 0u64;
     let mut rodata_size = 0u64;

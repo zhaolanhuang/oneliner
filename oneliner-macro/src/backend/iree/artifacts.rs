@@ -10,10 +10,18 @@ use super::metadata::load_metadata;
 use super::object_size::measure_object;
 use super::toolchain::{run_converter, run_iree_compile};
 use super::{ArtifactPaths, BindingArtifact, IreeArtifacts};
+use crate::args::{VmcuArg, VmcuScheduleArg};
 use crate::frontend::{Model, TensorInfo};
 use crate::utils::{required_path_env, rust_ident};
 
-pub(super) fn build(struct_ident: &Ident, model: Model) -> syn::Result<IreeArtifacts> {
+pub(super) fn build(
+    struct_ident: &Ident,
+    model: Model,
+    vmcu: VmcuArg,
+    vmcu_sram: Option<usize>,
+    vmcu_schedule: VmcuScheduleArg,
+    vmcu_search_states: usize,
+) -> syn::Result<IreeArtifacts> {
     let Model {
         source_path: model_path,
         compile_input_path,
@@ -40,14 +48,29 @@ pub(super) fn build(struct_ident: &Ident, model: Model) -> syn::Result<IreeArtif
     let vmfb_path = artifact_dir.join(format!("{model_stem}.vmfb"));
     let object_path = artifact_dir.join(format!("{model_stem}.o"));
 
-    run_iree_compile(&compile_input_path, &vmfb_path, &object_path, &ir_dump_dir)?;
+    // Split vMCU compilation resumes from `vmcu.rewritten.mlir`, so its phase
+    // dumps use a different stem than the frontend's original compile input.
+    let final_dump_stem = run_iree_compile(
+        &compile_input_path,
+        &vmfb_path,
+        &object_path,
+        &ir_dump_dir,
+        &artifact_dir,
+        &ir_dump_stem,
+        vmcu,
+        vmcu_sram,
+        vmcu_schedule,
+        vmcu_search_states,
+    )?;
     let (query_fn, query_link_name) = parse_query_function(&object_path)?;
     let footprint = measure_object(&object_path)?;
 
-    let ir_path = ir_dump_dir.join(format!("{ir_dump_stem}.10.executable-targets.mlir"));
+    let ir_path = ir_dump_dir.join(format!("{final_dump_stem}.10.executable-targets.mlir"));
     let flow_rs = artifact_dir.join(format!("{model_stem}.flow.rs"));
     let metadata_json = artifact_dir.join(format!("{model_stem}.flow.json"));
-    run_converter(&ir_path, &flow_rs, &metadata_json)?;
+    let compact_plan =
+        (final_dump_stem == "vmcu_rewritten").then(|| artifact_dir.join("vmcu.plan.json"));
+    run_converter(&ir_path, &flow_rs, &metadata_json, compact_plan.as_deref())?;
 
     let metadata = load_metadata(&metadata_json)?;
     let input = metadata.input.ok_or_else(|| {
@@ -73,6 +96,7 @@ pub(super) fn build(struct_ident: &Ident, model: Model) -> syn::Result<IreeArtif
         execute_fns: metadata.execute_fns,
         input,
         output: metadata.output,
+        io_pool: metadata.io_pool,
         input_tensor: model_io.input,
         output_tensor: model_io.output,
         params_size: metadata.params_size,

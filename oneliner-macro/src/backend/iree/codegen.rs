@@ -25,6 +25,18 @@ pub(super) fn expand(
     let metadata_json_path = path_lit(&paths.metadata_json);
     let input_size = artifacts.input.size;
     let output_size = artifacts.output.size;
+    let io_pool_size = artifacts
+        .io_pool
+        .as_ref()
+        .map_or(0, |pool| pool.allocated_bytes);
+    let input_offset = artifacts
+        .io_pool
+        .as_ref()
+        .map_or(0, |pool| pool.input_offset);
+    let output_offset = artifacts
+        .io_pool
+        .as_ref()
+        .map_or(0, |pool| pool.output_offset);
     let params_size = artifacts.params_size;
     let code_size = artifacts.code_size;
     let rodata_size = artifacts.rodata_size;
@@ -97,15 +109,20 @@ pub(super) fn expand(
         }
     };
 
-    let execute = quote! {
-        #(
-            #module_ident::#execute_fns(
-                arena,
-                input_buffer,
-                output_buffer,
-            )
-                .expect("Oneliner inference dispatch failed");
-        )*
+    let execute = if artifacts.io_pool.is_some() {
+        quote! {
+            #(
+                #module_ident::#execute_fns(arena, io_pool_buffer)
+                    .expect("Oneliner in-place inference dispatch failed");
+            )*
+        }
+    } else {
+        quote! {
+            #(
+                #module_ident::#execute_fns(arena, input_buffer, output_buffer)
+                    .expect("Oneliner inference dispatch failed");
+            )*
+        }
     };
 
     let run_with_arena = match arena {
@@ -118,6 +135,87 @@ pub(super) fn expand(
                 #execute
             });
         },
+    };
+
+    let inference_impl = if artifacts.io_pool.is_some() {
+        quote! {
+            impl ::oneliner::runtime::InPlaceModelInference for #struct_ident {
+                type IoBuffer = ::oneliner::runtime::VmcuIoBuffer<#io_pool_size>;
+                type InputViewMut<'a> = ::oneliner::runtime::TensorViewMut4<
+                    'a, #input_type, #input_d0, #input_d1, #input_d2, #input_d3,
+                >;
+                type OutputView<'a> = ::oneliner::runtime::TensorView4<
+                    'a, #output_type, #output_d0, #output_d1, #output_d2, #output_d3,
+                >;
+
+                fn create_io_buffer() -> Self::IoBuffer {
+                    Self::IoBuffer::new(0)
+                }
+
+                fn input_view_mut<'a>(
+                    pool: &'a mut Self::IoBuffer,
+                ) -> Self::InputViewMut<'a> {
+                    let bytes = &mut pool.as_bytes_mut()[
+                        #input_offset..#input_offset + #input_size
+                    ];
+                    ::oneliner::runtime::TensorViewMut4::from_bytes(bytes)
+                }
+
+                fn run_in_place<'a>(
+                    &mut self,
+                    pool: &'a mut Self::IoBuffer,
+                ) -> Self::OutputView<'a> {
+                    let io_pool_buffer = ::oneliner::runtime::BufferMut::new(
+                        pool.as_mut_ptr(),
+                        pool.len(),
+                    );
+                    #run_with_arena
+                    let bytes = &pool.as_bytes()[
+                        #output_offset..#output_offset + #output_size
+                    ];
+                    ::oneliner::runtime::TensorView4::from_bytes(bytes)
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl ::oneliner::runtime::ModelInference for #struct_ident {
+                type InputTensor = ::oneliner::runtime::Tensor<
+                    #input_type,
+                    #input_d0,
+                    #input_d1,
+                    #input_d2,
+                    #input_d3,
+                >;
+                type OutputTensor = ::oneliner::runtime::Tensor<
+                    #output_type,
+                    #output_d0,
+                    #output_d1,
+                    #output_d2,
+                    #output_d3,
+                >;
+
+                fn create_input_tensor() -> Self::InputTensor {
+                    Self::InputTensor::new(0 as #input_type)
+                }
+
+                fn run(&mut self, input: &Self::InputTensor) -> Self::OutputTensor {
+                    let input_buffer = ::oneliner::runtime::Buffer::new(
+                        input.as_ptr().cast::<u8>(),
+                        input.byte_len(),
+                    );
+
+                    let mut output = Self::OutputTensor::new(0 as #output_type);
+                    let output_buffer = ::oneliner::runtime::BufferMut::new(
+                        output.as_mut_ptr().cast::<u8>(),
+                        output.byte_len(),
+                    );
+
+                    #run_with_arena
+                    output
+                }
+            }
+        }
     };
 
     quote! {
@@ -183,6 +281,9 @@ pub(super) fn expand(
                 metadata_json_path: #metadata_json_path,
                 input_size: #input_size,
                 output_size: #output_size,
+                io_pool_size: #io_pool_size,
+                input_offset: #input_offset,
+                output_offset: #output_offset,
                 params_size: #params_size,
                 code_size: #code_size,
                 rodata_size: #rodata_size,
@@ -191,43 +292,7 @@ pub(super) fn expand(
             };
         }
 
-        impl ::oneliner::runtime::ModelInference for #struct_ident {
-            type InputTensor = ::oneliner::runtime::Tensor<
-                #input_type,
-                #input_d0,
-                #input_d1,
-                #input_d2,
-                #input_d3,
-            >;
-            type OutputTensor = ::oneliner::runtime::Tensor<
-                #output_type,
-                #output_d0,
-                #output_d1,
-                #output_d2,
-                #output_d3,
-            >;
-
-            fn create_input_tensor() -> Self::InputTensor {
-                Self::InputTensor::new(0 as #input_type)
-            }
-
-            fn run(&mut self, input: &Self::InputTensor) -> Self::OutputTensor {
-                let input_buffer = ::oneliner::runtime::Buffer::new(
-                    input.as_ptr().cast::<u8>(),
-                    input.byte_len(),
-                );
-
-                let mut output = Self::OutputTensor::new(0 as #output_type);
-                let output_buffer = ::oneliner::runtime::BufferMut::new(
-                    output.as_mut_ptr().cast::<u8>(),
-                    output.byte_len(),
-                );
-
-                #run_with_arena
-
-                output
-            }
-        }
+        #inference_impl
     }
 }
 
