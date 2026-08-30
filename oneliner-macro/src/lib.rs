@@ -16,18 +16,11 @@ pub fn model(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr = parse_macro_input!(attr as AttributeArgs);
     let input_struct = parse_macro_input!(item as ItemStruct);
 
-    let expanded = args::ModelArgs::parse(attr).and_then(|args| {
+    let expanded = args::ModelArgs::parse(attr).and_then(|mut args| {
+        let backend_options =
+            backend::parse_options(args.backend, core::mem::take(&mut args.backend_options))?;
         let model = frontend::prepare(&args, &input_struct)?;
-        backend::expand(
-            args.backend,
-            args.arena,
-            args.vmcu,
-            args.vmcu_sram,
-            args.vmcu_schedule,
-            args.vmcu_search_states,
-            input_struct,
-            model,
-        )
+        backend::expand(args.arena, backend_options, input_struct, model)
     });
     match expanded {
         Ok(tokens) => tokens.into(),

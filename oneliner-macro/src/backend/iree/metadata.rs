@@ -10,57 +10,27 @@ use crate::utils::parse_ident;
 #[derive(Debug)]
 pub(super) struct FlowMetadata {
     pub execute_fns: Vec<Ident>,
-    pub input: Option<BindingArtifact>,
-    pub output: BindingArtifact,
-    pub io_pool: Option<CompactIoMetadata>,
+    pub io: FlowIo,
     /// Deduplicated constant/weight bytes placed in flash.
     pub params_size: usize,
     /// Deduplicated transient workspace bytes held in RAM.
     pub ram_size: usize,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct CompactIoMetadata {
-    pub allocated_bytes: usize,
-    pub input_offset: usize,
-    pub input_size: usize,
-    pub output_offset: usize,
-    pub output_size: usize,
+#[derive(Debug)]
+pub(super) enum FlowIo {
+    Separate {
+        input: BindingArtifact,
+        output: BindingArtifact,
+    },
+    InPlace {
+        size: usize,
+    },
 }
 
 #[derive(Deserialize)]
 struct Metadata {
     cmd_executes: Vec<Execute>,
-}
-
-#[derive(Deserialize)]
-struct VmcuPlan {
-    schema_version: usize,
-    applied: bool,
-    compact_graph: serde_json::Value,
-}
-
-#[derive(Deserialize)]
-struct CompactGraph {
-    allocated_pool_bytes: usize,
-    tensors: Vec<CompactTensor>,
-    placements: Vec<CompactPlacement>,
-}
-
-#[derive(Deserialize)]
-struct CompactTensor {
-    name: String,
-    size_bytes: usize,
-    #[serde(default)]
-    is_graph_input: bool,
-    #[serde(default)]
-    is_graph_output: bool,
-}
-
-#[derive(Deserialize)]
-struct CompactPlacement {
-    tensor: String,
-    base: usize,
 }
 
 #[derive(Deserialize)]
@@ -88,115 +58,7 @@ enum Role {
     Other,
 }
 
-pub(super) fn load_compact_metadata(path: &Path) -> syn::Result<Option<CompactIoMetadata>> {
-    let plan: VmcuPlan = serde_json::from_str(
-        &fs::read_to_string(path).map_err(|error| syn::Error::new(Span::call_site(), error))?,
-    )
-    .map_err(|error| syn::Error::new(Span::call_site(), error))?;
-    if plan.schema_version != 4 {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            format!(
-                "unsupported vMCU plan schema {}; expected schema 4",
-                plan.schema_version
-            ),
-        ));
-    }
-    if !plan.applied {
-        return Ok(None);
-    }
-
-    let graph: CompactGraph = serde_json::from_value(plan.compact_graph)
-        .map_err(|error| syn::Error::new(Span::call_site(), error))?;
-    if graph.allocated_pool_bytes == 0 {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            "applied vMCU plan has an empty I/O pool",
-        ));
-    }
-    let input = unique_graph_tensor(&graph.tensors, true)?;
-    let output = unique_graph_tensor(&graph.tensors, false)?;
-    let input_offset = placement_base(&graph.placements, &input.name)?;
-    let output_offset = placement_base(&graph.placements, &output.name)?;
-    validate_view(
-        "input",
-        input_offset,
-        input.size_bytes,
-        graph.allocated_pool_bytes,
-    )?;
-    validate_view(
-        "output",
-        output_offset,
-        output.size_bytes,
-        graph.allocated_pool_bytes,
-    )?;
-
-    Ok(Some(CompactIoMetadata {
-        allocated_bytes: graph.allocated_pool_bytes,
-        input_offset,
-        input_size: input.size_bytes,
-        output_offset,
-        output_size: output.size_bytes,
-    }))
-}
-
-fn unique_graph_tensor(tensors: &[CompactTensor], input: bool) -> syn::Result<&CompactTensor> {
-    let mut matches = tensors.iter().filter(|tensor| {
-        if input {
-            tensor.is_graph_input
-        } else {
-            tensor.is_graph_output
-        }
-    });
-    let tensor = matches.next().ok_or_else(|| {
-        syn::Error::new(
-            Span::call_site(),
-            format!(
-                "vMCU plan has no graph {} tensor",
-                if input { "input" } else { "output" }
-            ),
-        )
-    })?;
-    if matches.next().is_some() {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            format!(
-                "vMCU plan has multiple graph {} tensors",
-                if input { "input" } else { "output" }
-            ),
-        ));
-    }
-    Ok(tensor)
-}
-
-fn placement_base(placements: &[CompactPlacement], tensor: &str) -> syn::Result<usize> {
-    placements
-        .iter()
-        .find(|placement| placement.tensor == tensor)
-        .map(|placement| placement.base)
-        .ok_or_else(|| {
-            syn::Error::new(
-                Span::call_site(),
-                format!("vMCU plan has no placement for {tensor}"),
-            )
-        })
-}
-
-fn validate_view(label: &str, offset: usize, size: usize, pool_size: usize) -> syn::Result<()> {
-    let end = offset.checked_add(size);
-    if size == 0 || end.is_none() || end.unwrap() > pool_size {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            format!("vMCU {label} view is outside the allocated I/O pool"),
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn load_metadata(
-    path: &Path,
-    compact: Option<CompactIoMetadata>,
-) -> syn::Result<FlowMetadata> {
+pub(super) fn load_metadata(path: &Path) -> syn::Result<FlowMetadata> {
     let metadata: Metadata = serde_json::from_str(
         &fs::read_to_string(path).map_err(|error| syn::Error::new(Span::call_site(), error))?,
     )
@@ -212,75 +74,54 @@ pub(super) fn load_metadata(
         .iter()
         .flat_map(|execute| execute.resources.iter())
         .collect();
-    let (input, output, io_pool) = if let Some(pool) = compact {
-        let inout_resources: Vec<_> = resources
-            .iter()
-            .filter(|resource| resource.role == Role::Inout)
-            .collect();
-        if inout_resources.is_empty() {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "applied vMCU plan requires an external read/write Flow resource",
-            ));
-        }
-        if resources
-            .iter()
-            .any(|resource| matches!(resource.role, Role::Input | Role::Output))
-        {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "applied vMCU Flow must not expose separate input or output resources",
-            ));
-        }
-        if inout_resources
-            .iter()
-            .any(|resource| resource.size != Some(pool.allocated_bytes))
-        {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "vMCU plan and Flow inout pool sizes differ",
-            ));
-        }
-        (
-            Some(BindingArtifact {
-                size: pool.input_size,
-            }),
-            BindingArtifact {
-                size: pool.output_size,
-            },
-            Some(pool),
-        )
-    } else {
-        if resources
-            .iter()
-            .any(|resource| resource.role == Role::Inout)
-        {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "Flow exposes an inout resource without an applied compact plan",
-            ));
-        }
+    let inout_resources: Vec<_> = resources
+        .iter()
+        .filter(|resource| resource.role == Role::Inout)
+        .collect();
+    let io = if inout_resources.is_empty() {
         let input = resources
             .iter()
             .find(|resource| resource.role == Role::Input)
             .and_then(|resource| resource.size)
-            .map(|size| BindingArtifact { size });
+            .map(|size| BindingArtifact { size })
+            .ok_or_else(|| syn::Error::new(Span::call_site(), "missing input binding"))?;
         let output = resources
             .iter()
             .find(|resource| resource.role == Role::Output)
             .and_then(|resource| resource.size)
             .map(|size| BindingArtifact { size })
             .ok_or_else(|| syn::Error::new(Span::call_site(), "missing output binding"))?;
-        (input, output, None)
+        FlowIo::Separate { input, output }
+    } else {
+        if resources
+            .iter()
+            .any(|resource| matches!(resource.role, Role::Input | Role::Output))
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "Flow must not mix inout with separate input or output resources",
+            ));
+        }
+        let size = inout_resources[0]
+            .size
+            .ok_or_else(|| syn::Error::new(Span::call_site(), "inout binding has no size"))?;
+        if inout_resources
+            .iter()
+            .any(|resource| resource.size != Some(size))
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "Flow execute functions expose different inout resource sizes",
+            ));
+        }
+        FlowIo::InPlace { size }
     };
 
     let (params_size, ram_size) = footprint_sizes(resources.iter().copied());
 
     Ok(FlowMetadata {
         execute_fns,
-        input,
-        output,
-        io_pool,
+        io,
         params_size,
         ram_size,
     })

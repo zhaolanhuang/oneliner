@@ -6,21 +6,18 @@ use proc_macro2::Span;
 use syn::Ident;
 
 use super::discovery::parse_query_function;
-use super::metadata::{load_compact_metadata, load_metadata};
+use super::metadata::load_metadata;
 use super::object_size::measure_object;
-use super::toolchain::{run_converter, run_iree_compile};
-use super::{ArtifactPaths, BindingArtifact, IreeArtifacts};
-use crate::args::{VmcuArg, VmcuScheduleArg};
+use super::toolchain::{run_converter, Compiler};
+use super::vmcu;
+use super::{ArtifactPaths, IreeArtifacts};
 use crate::frontend::{Model, TensorInfo};
 use crate::utils::{required_path_env, rust_ident};
 
 pub(super) fn build(
     struct_ident: &Ident,
     model: Model,
-    vmcu: VmcuArg,
-    vmcu_sram: Option<usize>,
-    vmcu_schedule: VmcuScheduleArg,
-    vmcu_search_states: usize,
+    vmcu_options: vmcu::Options,
 ) -> syn::Result<IreeArtifacts> {
     let Model {
         source_path: model_path,
@@ -48,42 +45,40 @@ pub(super) fn build(
     let vmfb_path = artifact_dir.join(format!("{model_stem}.vmfb"));
     let object_path = artifact_dir.join(format!("{model_stem}.o"));
 
-    // Split vMCU compilation resumes from `vmcu.rewritten.mlir`, so its phase
-    // dumps use a different stem than the frontend's original compile input.
-    let final_dump_stem = run_iree_compile(
-        &compile_input_path,
-        &vmfb_path,
-        &object_path,
-        &ir_dump_dir,
-        &artifact_dir,
-        &ir_dump_stem,
-        vmcu,
-        vmcu_sram,
-        vmcu_schedule,
-        vmcu_search_states,
-    )?;
+    let (final_dump_stem, compact_io) = match vmcu_options {
+        vmcu::Options::Disabled => {
+            Compiler::new(None)?.compile_full(
+                &compile_input_path,
+                &vmfb_path,
+                &object_path,
+                &ir_dump_dir,
+            )?;
+            (ir_dump_stem, None)
+        }
+        vmcu::Options::Enabled(options) => {
+            let deployment = vmcu::compile(
+                options,
+                &compile_input_path,
+                &vmfb_path,
+                &object_path,
+                &ir_dump_dir,
+                &artifact_dir,
+            )?;
+            (deployment.dump_stem, deployment.compact_io)
+        }
+    };
     let (query_fn, query_link_name) = parse_query_function(&object_path)?;
     let footprint = measure_object(&object_path)?;
 
     let ir_path = ir_dump_dir.join(format!("{final_dump_stem}.10.executable-targets.mlir"));
     let flow_rs = artifact_dir.join(format!("{model_stem}.flow.rs"));
     let metadata_json = artifact_dir.join(format!("{model_stem}.flow.json"));
-    let compact_io = if final_dump_stem == "vmcu_rewritten" {
-        load_compact_metadata(&artifact_dir.join("vmcu.plan.json"))?
-    } else {
-        None
-    };
     run_converter(&ir_path, &flow_rs, &metadata_json)?;
 
-    let metadata = load_metadata(&metadata_json, compact_io)?;
-    let input = metadata.input.ok_or_else(|| {
-        syn::Error::new(
-            Span::call_site(),
-            "IREE metadata does not contain an input binding",
-        )
-    })?;
-    validate_tensor_size("input", &input, &model_io.input)?;
-    validate_tensor_size("output", &metadata.output, &model_io.output)?;
+    let metadata = load_metadata(&metadata_json)?;
+    let io = vmcu::resolve_io(metadata.io, compact_io)?;
+    validate_tensor_size("input", io.input_size(), &model_io.input)?;
+    validate_tensor_size("output", io.output_size(), &model_io.output)?;
 
     Ok(IreeArtifacts {
         paths: ArtifactPaths {
@@ -97,9 +92,7 @@ pub(super) fn build(
         query_fn,
         query_link_name,
         execute_fns: metadata.execute_fns,
-        input,
-        output: metadata.output,
-        io_pool: metadata.io_pool,
+        io,
         input_tensor: model_io.input,
         output_tensor: model_io.output,
         params_size: metadata.params_size,
@@ -109,15 +102,11 @@ pub(super) fn build(
     })
 }
 
-fn validate_tensor_size(
-    label: &str,
-    binding: &BindingArtifact,
-    tensor: &TensorInfo,
-) -> syn::Result<()> {
+fn validate_tensor_size(label: &str, binding_size: usize, tensor: &TensorInfo) -> syn::Result<()> {
     let tensor_size = tensor
         .byte_len()
         .expect("frontend validated tensor byte size");
-    if tensor_size != binding.size {
+    if tensor_size != binding_size {
         return Err(syn::Error::new(
             Span::call_site(),
             format!(
@@ -125,7 +114,7 @@ fn validate_tensor_size(
                 tensor.shape,
                 tensor.element_type.byte_width(),
                 tensor_size,
-                binding.size,
+                binding_size,
             ),
         ));
     }

@@ -4,14 +4,27 @@ mod discovery;
 mod metadata;
 mod object_size;
 mod toolchain;
+mod vmcu;
 
 use std::path::PathBuf;
 
 use proc_macro2::TokenStream;
-use syn::Ident;
+use syn::{Ident, NestedMeta};
 
-use crate::args::{ArenaArg, VmcuArg, VmcuScheduleArg};
+use crate::args::ArenaArg;
 use crate::frontend::{Model, TensorInfo};
+
+pub(crate) struct Options {
+    vmcu: vmcu::Options,
+}
+
+impl Options {
+    pub(super) fn parse(args: Vec<NestedMeta>) -> syn::Result<Self> {
+        Ok(Self {
+            vmcu: vmcu::Options::parse(args)?,
+        })
+    }
+}
 
 #[derive(Debug)]
 struct ArtifactPaths {
@@ -28,15 +41,48 @@ struct BindingArtifact {
     size: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IoView {
+    offset: usize,
+    size: usize,
+}
+
+#[derive(Debug)]
+enum IoLayout {
+    Separate {
+        input_size: usize,
+        output_size: usize,
+    },
+    InPlace {
+        storage_size: usize,
+        input: IoView,
+        output: IoView,
+    },
+}
+
+impl IoLayout {
+    const fn input_size(&self) -> usize {
+        match self {
+            Self::Separate { input_size, .. } => *input_size,
+            Self::InPlace { input, .. } => input.size,
+        }
+    }
+
+    const fn output_size(&self) -> usize {
+        match self {
+            Self::Separate { output_size, .. } => *output_size,
+            Self::InPlace { output, .. } => output.size,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct IreeArtifacts {
     paths: ArtifactPaths,
     query_fn: Ident,
     query_link_name: String,
     execute_fns: Vec<Ident>,
-    input: BindingArtifact,
-    output: BindingArtifact,
-    io_pool: Option<metadata::CompactIoMetadata>,
+    io: IoLayout,
     input_tensor: TensorInfo,
     output_tensor: TensorInfo,
     params_size: usize,
@@ -52,31 +98,17 @@ pub fn expand(
     input_struct: syn::ItemStruct,
     model: Model,
     arena: ArenaArg,
-    vmcu: VmcuArg,
-    vmcu_sram: Option<usize>,
-    vmcu_schedule: VmcuScheduleArg,
-    vmcu_search_states: usize,
+    options: Options,
 ) -> syn::Result<TokenStream> {
-    let artifacts = artifacts::build(
-        &input_struct.ident,
-        model,
-        vmcu,
-        vmcu_sram,
-        vmcu_schedule,
-        vmcu_search_states,
-    )?;
+    let artifacts = artifacts::build(&input_struct.ident, model, options.vmcu)?;
 
     let params_size = artifacts.params_size;
     let code_size = artifacts.code_size;
     let rodata_size = artifacts.rodata_size;
     let total_flash_size = params_size + code_size + rodata_size;
     let ram_size = artifacts.ram_size;
-    let input_size = artifacts.input.size;
-    let output_size = artifacts.output.size;
-    let io_pool_size = artifacts
-        .io_pool
-        .as_ref()
-        .map_or(0, |pool| pool.allocated_bytes);
+    let input_size = artifacts.io.input_size();
+    let output_size = artifacts.io.output_size();
 
     eprintln!(
         "[oneliner-profiler] {} memory footprint:",
@@ -93,20 +125,19 @@ pub fn expand(
         total_flash_size,
         total_flash_size / 1024,
     );
-    if io_pool_size != 0 {
-        eprintln!(
+    match &artifacts.io {
+        IoLayout::InPlace { storage_size, .. } => eprintln!(
             "  RAM Usage: io_pool = {} B ({} KiB), transient arena = {} B ({} KiB), input = {} B ({} KiB), output = {} B ({} KiB)",
-            io_pool_size,
-            io_pool_size / 1024,
+            storage_size,
+            storage_size / 1024,
             ram_size,
             ram_size / 1024,
             input_size,
             input_size / 1024,
             output_size,
             output_size / 1024,
-        );
-    } else {
-        eprintln!(
+        ),
+        IoLayout::Separate { .. } => eprintln!(
             "  RAM Usage: arena = {} B ({} KiB), input = {} B ({} KiB), output = {} B ({} KiB)",
             ram_size,
             ram_size / 1024,
@@ -114,7 +145,7 @@ pub fn expand(
             input_size / 1024,
             output_size,
             output_size / 1024,
-        );
+        ),
     }
 
     let expanded = codegen::expand(input_struct, artifacts, arena);

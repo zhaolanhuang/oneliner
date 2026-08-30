@@ -3,9 +3,23 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{ItemStruct, LitStr, Meta, NestedMeta};
 
-use super::IreeArtifacts;
+use super::{vmcu, IoLayout, IreeArtifacts};
 use crate::args::ArenaArg;
 use crate::utils::{path_lit, rust_ident};
+
+pub(super) struct IoCodegen {
+    pub(super) has_model_storage: bool,
+    pub(super) model_field: TokenStream,
+    pub(super) constructor_field: TokenStream,
+    pub(super) execute_args: TokenStream,
+    pub(super) execute_error: &'static str,
+    pub(super) run_setup: TokenStream,
+    pub(super) run_finish: TokenStream,
+    pub(super) module_items: TokenStream,
+    pub(super) storage_size: usize,
+    pub(super) input_offset: usize,
+    pub(super) output_offset: usize,
+}
 
 pub(super) fn expand(
     input_struct: ItemStruct,
@@ -23,20 +37,8 @@ pub(super) fn expand(
     let object_path = path_lit(&paths.object);
     let ir_path = path_lit(&paths.ir);
     let metadata_json_path = path_lit(&paths.metadata_json);
-    let input_size = artifacts.input.size;
-    let output_size = artifacts.output.size;
-    let io_pool_size = artifacts
-        .io_pool
-        .as_ref()
-        .map_or(0, |pool| pool.allocated_bytes);
-    let input_offset = artifacts
-        .io_pool
-        .as_ref()
-        .map_or(0, |pool| pool.input_offset);
-    let output_offset = artifacts
-        .io_pool
-        .as_ref()
-        .map_or(0, |pool| pool.output_offset);
+    let input_size = artifacts.io.input_size();
+    let output_size = artifacts.io.output_size();
     let params_size = artifacts.params_size;
     let code_size = artifacts.code_size;
     let rodata_size = artifacts.rodata_size;
@@ -50,12 +52,34 @@ pub(super) fn expand(
     let [input_d0, input_d1, input_d2, input_d3] = artifacts.input_tensor.shape;
     let [output_d0, output_d1, output_d2, output_d3] = artifacts.output_tensor.shape;
 
-    let model_definition = match (arena, artifacts.io_pool.is_some()) {
+    let io_codegen = match &artifacts.io {
+        IoLayout::Separate { .. } => standard_fragments(&output_type),
+        IoLayout::InPlace {
+            storage_size,
+            input,
+            output,
+        } => vmcu::compact_fragments(*storage_size, *input, *output, &output_type, &module_ident),
+    };
+    let IoCodegen {
+        has_model_storage,
+        model_field,
+        constructor_field,
+        execute_args,
+        execute_error,
+        run_setup,
+        run_finish,
+        module_items,
+        storage_size: io_pool_size,
+        input_offset,
+        output_offset,
+    } = io_codegen;
+
+    let model_definition = match (arena, has_model_storage) {
         (ArenaArg::Owned, true) => quote! {
             #(#struct_attrs)*
             #struct_vis struct #struct_ident {
                 __arena: ::oneliner::runtime::OwnedArena<#module_ident::Workspace>,
-                __io_buffer: #module_ident::IoBuffer<#io_pool_size>,
+                #model_field
             }
         },
         (ArenaArg::Owned, false) => quote! {
@@ -67,7 +91,7 @@ pub(super) fn expand(
         (ArenaArg::Shared, true) => quote! {
             #(#struct_attrs)*
             #struct_vis struct #struct_ident {
-                __io_buffer: #module_ident::IoBuffer<#io_pool_size>,
+                #model_field
             }
         },
         (ArenaArg::Shared, false) => quote! {
@@ -87,7 +111,7 @@ pub(super) fn expand(
         },
     };
 
-    let model_constructor = match (arena, artifacts.io_pool.is_some()) {
+    let model_constructor = match (arena, has_model_storage) {
         (ArenaArg::Owned, true) => quote! {
             impl #struct_ident {
                 /// Creates a model with an arena owned exclusively by this instance.
@@ -96,7 +120,7 @@ pub(super) fn expand(
                         __arena: ::oneliner::runtime::OwnedArena::new(
                             #module_ident::Workspace::new(),
                         ),
-                        __io_buffer: #module_ident::IoBuffer::new(0),
+                        #constructor_field
                     }
                 }
             }
@@ -118,7 +142,7 @@ pub(super) fn expand(
                 /// Creates a model instance backed by the model type's shared static arena.
                 pub const fn new() -> Self {
                     Self {
-                        __io_buffer: #module_ident::IoBuffer::new(0),
+                        #constructor_field
                     }
                 }
             }
@@ -145,20 +169,11 @@ pub(super) fn expand(
         }
     };
 
-    let execute = if artifacts.io_pool.is_some() {
-        quote! {
-            #(
-                #module_ident::#execute_fns(arena, inout_buffer)
-                    .expect("Oneliner in-place inference dispatch failed");
-            )*
-        }
-    } else {
-        quote! {
-            #(
-                #module_ident::#execute_fns(arena, input_buffer, output_buffer)
-                    .expect("Oneliner inference dispatch failed");
-            )*
-        }
+    let execute = quote! {
+        #(
+            #module_ident::#execute_fns(arena, #execute_args)
+                .expect(#execute_error);
+        )*
     };
 
     let run_with_arena = match arena {
@@ -173,52 +188,10 @@ pub(super) fn expand(
         },
     };
 
-    let run_body = if artifacts.io_pool.is_some() {
-        quote! {
-            let input_bytes = unsafe {
-                ::core::slice::from_raw_parts(
-                    input.as_ptr().cast::<u8>(),
-                    input.byte_len(),
-                )
-            };
-            self.__io_buffer.as_bytes_mut()[
-                #input_offset..#input_offset + #input_size
-            ].copy_from_slice(input_bytes);
-
-            let inout_buffer = ::oneliner::runtime::BufferMut::new(
-                self.__io_buffer.as_mut_ptr(),
-                self.__io_buffer.len(),
-            );
+    let run_body = quote! {
+            #run_setup
             #run_with_arena
-
-            let mut output = Self::OutputTensor::new(0 as #output_type);
-            let output_bytes = unsafe {
-                ::core::slice::from_raw_parts_mut(
-                    output.as_mut_ptr().cast::<u8>(),
-                    output.byte_len(),
-                )
-            };
-            output_bytes.copy_from_slice(&self.__io_buffer.as_bytes()[
-                #output_offset..#output_offset + #output_size
-            ]);
-            output
-        }
-    } else {
-        quote! {
-            let input_buffer = ::oneliner::runtime::Buffer::new(
-                input.as_ptr().cast::<u8>(),
-                input.byte_len(),
-            );
-
-            let mut output = Self::OutputTensor::new(0 as #output_type);
-            let output_buffer = ::oneliner::runtime::BufferMut::new(
-                output.as_mut_ptr().cast::<u8>(),
-                output.byte_len(),
-            );
-
-            #run_with_arena
-            output
-        }
+            #run_finish
     };
 
     let inference_impl = quote! {
@@ -247,44 +220,6 @@ pub(super) fn expand(
             }
         }
     };
-
-    let io_buffer_definition = artifacts.io_pool.is_some().then(|| {
-        quote! {
-            pub(super) struct IoBuffer<const N: usize> {
-                storage: Aligned<AlignedType, [u8; N]>,
-            }
-
-            impl<const N: usize> IoBuffer<N> {
-                pub(super) const fn new(value: u8) -> Self {
-                    Self {
-                        storage: Aligned([value; N]),
-                    }
-                }
-
-                pub(super) fn as_bytes(&self) -> &[u8] {
-                    &self.storage[..]
-                }
-
-                pub(super) fn as_bytes_mut(&mut self) -> &mut [u8] {
-                    &mut self.storage[..]
-                }
-
-                pub(super) fn as_mut_ptr(&mut self) -> *mut u8 {
-                    self.as_bytes_mut().as_mut_ptr()
-                }
-
-                pub(super) const fn len(&self) -> usize {
-                    N
-                }
-            }
-
-            impl<const N: usize> Default for IoBuffer<N> {
-                fn default() -> Self {
-                    Self::new(0)
-                }
-            }
-        }
-    });
 
     quote! {
         #model_definition
@@ -327,7 +262,7 @@ pub(super) fn expand(
 
             static QUERY_FN_PTR: iree_hal_executable_library_query_fn_t = #query_fn;
 
-            #io_buffer_definition
+            #module_items
 
             include!(#flow_rs);
 
@@ -363,6 +298,32 @@ pub(super) fn expand(
         }
 
         #inference_impl
+    }
+}
+
+fn standard_fragments(output_type: &TokenStream) -> IoCodegen {
+    IoCodegen {
+        has_model_storage: false,
+        model_field: quote! {},
+        constructor_field: quote! {},
+        execute_args: quote! { input_buffer, output_buffer },
+        execute_error: "Oneliner inference dispatch failed",
+        run_setup: quote! {
+            let input_buffer = ::oneliner::runtime::Buffer::new(
+                input.as_ptr().cast::<u8>(),
+                input.byte_len(),
+            );
+            let mut output = Self::OutputTensor::new(0 as #output_type);
+            let output_buffer = ::oneliner::runtime::BufferMut::new(
+                output.as_mut_ptr().cast::<u8>(),
+                output.byte_len(),
+            );
+        },
+        run_finish: quote! { output },
+        module_items: quote! {},
+        storage_size: 0,
+        input_offset: 0,
+        output_offset: 0,
     }
 }
 
