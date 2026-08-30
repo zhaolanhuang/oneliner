@@ -9,6 +9,7 @@ import unittest
 import random
 from collections import Counter
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).parents[1]
@@ -29,6 +30,9 @@ REAL_TARGET_DIRECTORY = REAL_PREPROCESSING.parent
 sys.path.insert(0, str(PYTHON_DIR))
 
 from oneliner_vmcu import RewriteError, rewrite_text  # noqa: E402
+from oneliner_vmcu import compact_analysis as compact_analysis_module  # noqa: E402
+from oneliner_vmcu import compact_memory as compact_memory_module  # noqa: E402
+from oneliner_vmcu import rewrite as rewrite_module  # noqa: E402
 from oneliner_vmcu.reference import (  # noqa: E402
     emitted_style_fully_connected,
     tensor_style_fully_connected,
@@ -322,6 +326,88 @@ class VmcuRewriterTests(unittest.TestCase):
                 for path in REAL_TARGET_DIRECTORY.iterdir()
                 if path.is_file()
             },
+        )
+
+    @unittest.skipUnless(
+        REAL_PREPROCESSING.is_file(),
+        "the checked-in MCUNet preprocessing IR is required",
+    )
+    def test_compact_transaction_plans_once_and_rebinds_second_parse(self):
+        """Planning is source-only; mutation uses rebound values and one old plan."""
+        counts = Counter()
+        contexts = []
+        original_analyze = PatternRegistry.analyze
+        original_build_schedules = compact_analysis_module._build_access_schedules
+        original_plan = compact_analysis_module.plan_compact_graph
+        original_first_replay = compact_memory_module.replay_compact_graph_plan
+        original_second_replay = compact_analysis_module.replay_compact_graph_plan
+        original_parse = rewrite_module._parse
+        original_emit = rewrite_module.emit_compact_graph
+
+        def analyze(registry, normalized):
+            counts["registry"] += 1
+            return original_analyze(registry, normalized)
+
+        def build_schedules(graph):
+            counts["schedules"] += 1
+            return original_build_schedules(graph)
+
+        def plan(*args, **kwargs):
+            counts["plan"] += 1
+            return original_plan(*args, **kwargs)
+
+        def first_replay(plan):
+            counts["replay"] += 1
+            return original_first_replay(plan)
+
+        def second_replay(plan):
+            counts["replay"] += 1
+            return original_second_replay(plan)
+
+        def parse(text):
+            context, module = original_parse(text)
+            contexts.append(context)
+            return context, module
+
+        def emit(module, candidates, compact, bindings):
+            counts["emit"] += 1
+            self.assertEqual(len(contexts), 2)
+            self.assertTrue(
+                all(isinstance(item.target_type, str) for item in compact.boundaries)
+            )
+            self.assertTrue(bindings.boundaries)
+            self.assertTrue(
+                all(item.target_value.context == contexts[1] for item in bindings.boundaries)
+            )
+            return original_emit(module, candidates, compact, bindings)
+
+        with (
+            mock.patch.object(PatternRegistry, "analyze", analyze),
+            mock.patch.object(
+                compact_analysis_module, "_build_access_schedules", build_schedules
+            ),
+            mock.patch.object(compact_analysis_module, "plan_compact_graph", plan),
+            mock.patch.object(
+                compact_memory_module, "replay_compact_graph_plan", first_replay
+            ),
+            mock.patch.object(
+                compact_analysis_module,
+                "replay_compact_graph_plan",
+                second_replay,
+            ),
+            mock.patch.object(rewrite_module, "_parse", parse),
+            mock.patch.object(rewrite_module, "emit_compact_graph", emit),
+        ):
+            result = rewrite_module.rewrite_text(
+                REAL_PREPROCESSING.read_text(encoding="utf-8"), "auto"
+            )
+
+        self.assertTrue(result.plan["applied"])
+        self.assertEqual(
+            counts,
+            Counter(
+                {"registry": 2, "replay": 2, "schedules": 1, "plan": 1, "emit": 1}
+            ),
         )
 
     def test_matching_is_independent_of_function_and_ssa_names(self):

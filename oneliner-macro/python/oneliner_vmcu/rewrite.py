@@ -20,7 +20,11 @@ from .model import Analysis, PatternMatch, RejectedCandidate
 from .normalize import NormalizedModule, normalize_module
 from .registry import PatternRegistry, create_default_registry
 from .versioning import CompilerVersionDiagnostics, diagnose_compiler_versions
-from .compact_analysis import CompactAnalysis, build_compact_analysis
+from .compact_analysis import (
+    CompactAnalysis,
+    build_compact_analysis,
+    rebind_compact_analysis,
+)
 from .pool_emitter import emit_compact_graph
 
 
@@ -248,8 +252,8 @@ def rewrite_text(
 
     ``build_compact_analysis`` realizes the paper-facing planning stages from
     vMCU §4 and §5.2; ``emit_compact_graph`` realizes the compiler/kernel side
-    of §3 and §6. The first and second analyses intentionally repeat the plan
-    so the graph and physical placement are reproducible before mutation.
+    of §3 and §6. The first parse builds, searches, and replays the plan. The
+    second parse only rebinds live MLIR values and replays that immutable plan.
 
     The first parse is never mutated. If candidates exist, a second parse must
     produce the exact same candidate identities before any edit is made. The
@@ -363,17 +367,16 @@ def rewrite_text(
             raise RewriteError("transactional re-analysis produced different candidates")
         try:
             if use_compact_emitter:
-                rewrite_compact = build_compact_analysis(
-                    rewrite_analysis,
-                    search_mode=schedule_search,
-                    search_state_limit=search_state_limit,
+                rewrite_bindings = rebind_compact_analysis(
+                    rewrite_analysis, source_compact
                 )
-                if rewrite_compact.plan.to_dict() != source_compact.plan.to_dict():
-                    raise RewriteError("transactional compact plan changed after reparse")
                 emit_compact_graph(
-                    rewrite_module, tuple(rewrite_analysis.matches), rewrite_compact
+                    rewrite_module,
+                    tuple(rewrite_analysis.matches),
+                    source_compact,
+                    rewrite_bindings,
                 )
-                del rewrite_compact
+                del rewrite_bindings
                 del rewrite_analysis
             else:
                 current_analysis = rewrite_analysis

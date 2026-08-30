@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "oneliner-macro" / "python"))
 
 from oneliner_vmcu.compact_memory import (  # noqa: E402
     KernelAccessSchedule,
+    OutputWriteSchedule,
     ScheduleSearchMode,
     TensorPlacement,
     VirtualTensor,
@@ -32,8 +33,8 @@ def _paper_fc_graph():
         "output",
         # The fourth logical output is scheduled first into the one free slot;
         # the other outputs overwrite input only after its final segment read.
-        (("input", (5, 5, 5, 5, 5, 5)),),
-        (10, 11, 12, 1),
+        (("input", segment_last_reads((5, 5, 5, 5, 5, 5), 1)),),
+        OutputWriteSchedule.explicit((10, 11, 12, 1)),
         1,
         kind="fully_connected",
     )
@@ -71,10 +72,9 @@ class CompactMemoryTests(unittest.TestCase):
 
     def test_segment_lifetime_is_maximum_element_lifetime(self):
         """Checks the segment-lifetime definition in vMCU Introduction (PDF p.2)."""
-        self.assertEqual(
-            segment_last_reads((0, 3, 1, 2, 9), 2),
-            (3, 3, 2, 2, 9),
-        )
+        schedule = segment_last_reads((0, 3, 1, 2, 9), 2)
+        self.assertEqual(schedule.segment_events, (3, 2, 9))
+        self.assertEqual(tuple(schedule), (3, 3, 2, 2, 9))
 
     def test_diamond_preserves_input_until_its_last_consumer(self):
         """Checks the graph constraint from vMCU §5.2 Equation (2) (PDF p.6)."""
@@ -86,17 +86,31 @@ class CompactMemoryTests(unittest.TestCase):
         )
         kernels = (
             KernelAccessSchedule(
-                "left", ("input",), "left_value", (("input", (0, 1, 2, 3)),),
-                (4, 5, 6), 1,
+                "left",
+                ("input",),
+                "left_value",
+                (("input", segment_last_reads((0, 1, 2, 3), 1)),),
+                OutputWriteSchedule.affine(3, 4, 1),
+                1,
             ),
             KernelAccessSchedule(
-                "right", ("input",), "right_value", (("input", (0, 1, 2, 3)),),
-                (4, 5, 6), 1,
+                "right",
+                ("input",),
+                "right_value",
+                (("input", segment_last_reads((0, 1, 2, 3), 1)),),
+                OutputWriteSchedule.affine(3, 4, 1),
+                1,
             ),
             KernelAccessSchedule(
-                "join", ("left_value", "right_value"), "output",
-                (("left_value", (0, 1, 2)), ("right_value", (0, 1, 2))),
-                (3, 4), 1,
+                "join",
+                ("left_value", "right_value"),
+                "output",
+                (
+                    ("left_value", segment_last_reads((0, 1, 2), 1)),
+                    ("right_value", segment_last_reads((0, 1, 2), 1)),
+                ),
+                OutputWriteSchedule.affine(2, 3, 1),
+                1,
             ),
         )
         plan = plan_compact_graph(tensors, kernels, search_mode="optimal", alignment=1)

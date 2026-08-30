@@ -10,7 +10,8 @@ Paper correspondence (vMCU, MLSys 2024):
 
 Engineering extension: the paper formulates offset selection as ILP and gives
 an informal graph generalization. This module instead performs deterministic
-greedy/bounded/exhaustive DAG search and independently replays every byte.
+greedy/bounded/exhaustive DAG search and independently replays physical range
+overlaps at activation-segment granularity.
 """
 
 from __future__ import annotations
@@ -76,24 +77,146 @@ class VirtualTensor:
 
 
 @dataclass(frozen=True)
+class SegmentReadSchedule:
+    """Last-read events stored once per activation segment."""
+
+    size_bytes: int
+    segment_bytes: int
+    segment_events: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if self.size_bytes <= 0 or self.segment_bytes <= 0:
+            raise ValueError("read schedule byte sizes must be positive")
+        segment_count = (self.size_bytes + self.segment_bytes - 1) // self.segment_bytes
+        if len(self.segment_events) not in (1, segment_count):
+            raise ValueError("read schedule does not cover its input segments")
+        if min(self.segment_events) < 0:
+            raise ValueError("read schedule events must be non-negative")
+
+    @classmethod
+    def constant(
+        cls, size_bytes: int, segment_bytes: int, event: int
+    ) -> "SegmentReadSchedule":
+        return cls(size_bytes, segment_bytes, (event,))
+
+    def event_at(self, logical_byte: int) -> int:
+        if not 0 <= logical_byte < self.size_bytes:
+            raise IndexError(logical_byte)
+        if len(self.segment_events) == 1:
+            return self.segment_events[0]
+        return self.segment_events[logical_byte // self.segment_bytes]
+
+    def next_event_change(self, logical_byte: int) -> int:
+        if len(self.segment_events) == 1:
+            return self.size_bytes
+        return min(
+            self.size_bytes,
+            (logical_byte // self.segment_bytes + 1) * self.segment_bytes,
+        )
+
+    def __iter__(self):
+        return (self.event_at(index) for index in range(self.size_bytes))
+
+
+@dataclass(frozen=True)
+class OutputWriteSchedule:
+    """Compact grouped-affine first-write events with an explicit fallback."""
+
+    size_bytes: int
+    first_event: int
+    byte_stride: int
+    group_bytes: int
+    group_gap: int = 0
+    explicit_events: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.size_bytes <= 0 or self.group_bytes <= 0:
+            raise ValueError("write schedule byte sizes must be positive")
+        if self.explicit_events:
+            if (
+                len(self.explicit_events) != self.size_bytes
+                or min(self.explicit_events) < 0
+            ):
+                raise ValueError("explicit write schedule is invalid")
+        elif self.first_event < 0 or self.byte_stride < 0 or self.group_gap < 0:
+            raise ValueError("affine write schedule is invalid")
+
+    @classmethod
+    def affine(
+        cls,
+        size_bytes: int,
+        first_event: int,
+        byte_stride: int,
+        *,
+        group_bytes: int | None = None,
+        group_gap: int = 0,
+    ) -> "OutputWriteSchedule":
+        return cls(
+            size_bytes,
+            first_event,
+            byte_stride,
+            group_bytes or size_bytes,
+            group_gap,
+        )
+
+    @classmethod
+    def explicit(cls, events: Iterable[int]) -> "OutputWriteSchedule":
+        event_items = tuple(events)
+        return cls(len(event_items), 0, 0, max(1, len(event_items)), 0, event_items)
+
+    def event_at(self, logical_byte: int) -> int:
+        if not 0 <= logical_byte < self.size_bytes:
+            raise IndexError(logical_byte)
+        if self.explicit_events:
+            return self.explicit_events[logical_byte]
+        return (
+            self.first_event
+            + logical_byte * self.byte_stride
+            + (logical_byte // self.group_bytes) * self.group_gap
+        )
+
+    def minimum_event(self, start: int, end: int) -> int:
+        if not 0 <= start < end <= self.size_bytes:
+            raise IndexError((start, end))
+        if self.explicit_events:
+            return min(self.explicit_events[start:end])
+        return self.event_at(start)
+
+    def __iter__(self):
+        return (self.event_at(index) for index in range(self.size_bytes))
+
+    def to_dict(self) -> dict[str, object]:
+        if self.explicit_events:
+            return {"kind": "explicit", "events": list(self.explicit_events)}
+        return {
+            "kind": "grouped_affine",
+            "size_bytes": self.size_bytes,
+            "first_event": self.first_event,
+            "byte_stride": self.byte_stride,
+            "group_bytes": self.group_bytes,
+            "group_gap": self.group_gap,
+        }
+
+
+@dataclass(frozen=True)
 class KernelAccessSchedule:
     """Last-read and first-write times for one fixed kernel schedule.
 
-    Event arrays are byte addressed. Callers raise element lifetimes to the
-    maximum lifetime of their segment before constructing this object.
+    Read lifetimes are compressed to one event per segment. Output writes use
+    a grouped-affine formula for production kernels.
 
     Paper correspondence: §4, PDF pp.4-5, iteration instances ``S[i]``, affine
     access functions, row-major linear addresses, and Equation (1)'s ordering
-    constraint. The explicit event arrays are this implementation's executable
-    representation of those affine relations, not a data structure prescribed
-    by the paper.
+    constraint. Compressed segment events and grouped-affine writes are this
+    implementation's executable representation of those relations, not data
+    structures prescribed by the paper.
     """
 
     name: str
     inputs: tuple[str, ...]
     output: str
-    input_last_reads: tuple[tuple[str, tuple[int, ...]], ...]
-    output_first_writes: tuple[int, ...]
+    input_last_reads: tuple[tuple[str, SegmentReadSchedule], ...]
+    output_first_writes: OutputWriteSchedule
     segment_bytes: int
     workspace_bytes: int = 0
     kind: str = "unknown"
@@ -105,16 +228,10 @@ class KernelAccessSchedule:
             raise ValueError("kernel inputs must be non-empty and unique")
         if self.segment_bytes <= 0 or self.workspace_bytes < 0:
             raise ValueError("kernel segment/workspace sizes are invalid")
-        if not self.output_first_writes or any(
-            step < 0 for step in self.output_first_writes
-        ):
-            raise ValueError("kernel output write events are invalid")
         if tuple(name for name, _ in self.input_last_reads) != self.inputs:
             raise ValueError("kernel read-event order must match its inputs")
-        if any(not events or min(events) < 0 for _, events in self.input_last_reads):
-            raise ValueError("kernel input read events are invalid")
 
-    def reads_for(self, tensor: str) -> tuple[int, ...]:
+    def reads_for(self, tensor: str) -> SegmentReadSchedule:
         for name, events in self.input_last_reads:
             if name == tensor:
                 return events
@@ -128,10 +245,7 @@ class KernelAccessSchedule:
             "output": self.output,
             "segment_bytes": self.segment_bytes,
             "workspace_bytes": self.workspace_bytes,
-            "input_last_reads": {
-                name: list(events) for name, events in self.input_last_reads
-            },
-            "output_first_writes": list(self.output_first_writes),
+            "output_write_schedule": self.output_first_writes.to_dict(),
         }
 
 
@@ -243,8 +357,8 @@ class CompactGraphPlan:
 
 def segment_last_reads(
     element_last_reads: Iterable[int], segment_bytes: int
-) -> tuple[int, ...]:
-    """Uses the maximum element lifetime for every byte in one segment.
+) -> SegmentReadSchedule:
+    """Compresses element lifetimes to one maximum event per segment.
 
     Paper correspondence: Introduction, PDF p.2, paragraph beginning "the data
     elements in input tensors may have different lifetime": segment lifetime
@@ -254,11 +368,14 @@ def segment_last_reads(
     events = tuple(element_last_reads)
     if not events or segment_bytes <= 0 or min(events) < 0:
         raise ValueError("segment lifetime inputs must be non-empty and non-negative")
-    result = list(events)
+    segment_events = []
     for start in range(0, len(events), segment_bytes):
         end = min(start + segment_bytes, len(events))
-        result[start:end] = [max(events[start:end])] * (end - start)
-    return tuple(result)
+        segment_events.append(max(events[start:end]))
+    compressed = tuple(segment_events)
+    if len(set(compressed)) == 1:
+        compressed = compressed[:1]
+    return SegmentReadSchedule(len(events), segment_bytes, compressed)
 
 
 def _validate_graph(
@@ -276,13 +393,13 @@ def _validate_graph(
         output = tensor_by_name.get(kernel.output)
         if output is None or output.producer != kernel.name:
             raise ValueError(f"kernel {kernel.name!r} output edge is invalid")
-        if len(kernel.output_first_writes) != output.size_bytes:
+        if kernel.output_first_writes.size_bytes != output.size_bytes:
             raise ValueError(f"kernel {kernel.name!r} output event size is invalid")
         for input_name in kernel.inputs:
             tensor = tensor_by_name.get(input_name)
             if tensor is None or kernel.name not in tensor.consumers:
                 raise ValueError(f"kernel {kernel.name!r} input edge is invalid")
-            if len(kernel.reads_for(input_name)) != tensor.size_bytes:
+            if kernel.reads_for(input_name).size_bytes != tensor.size_bytes:
                 raise ValueError(f"kernel {kernel.name!r} input event size is invalid")
     for tensor in tensors:
         if tensor.producer is not None and tensor.producer not in kernel_by_name:
@@ -292,38 +409,87 @@ def _validate_graph(
     return tensor_by_name, kernel_by_name
 
 
+@dataclass(frozen=True)
+class _PhysicalSpan:
+    start: int
+    end: int
+    logical_start: int
+
+
+def _physical_spans(
+    base: int, size_bytes: int, pool_bytes: int
+) -> tuple[_PhysicalSpan, ...]:
+    tail = min(size_bytes, pool_bytes - base)
+    first = _PhysicalSpan(base, base + tail, 0)
+    if tail == size_bytes:
+        return (first,)
+    return (first, _PhysicalSpan(0, size_bytes - tail, tail))
+
+
+def _live_layout(
+    live: Mapping[str, TensorPlacement],
+) -> tuple[tuple[str, tuple[_PhysicalSpan, ...]], ...]:
+    return tuple(
+        (
+            tensor_name,
+            _physical_spans(placement.base, placement.size_bytes, placement.pool_bytes),
+        )
+        for tensor_name, placement in live.items()
+    )
+
+
 def _safe_output_base(
     *,
     pool_bytes: int,
     output_base: int,
     output: VirtualTensor,
     kernel: KernelAccessSchedule,
-    live: Mapping[str, TensorPlacement],
+    live_layout: tuple[tuple[str, tuple[_PhysicalSpan, ...]], ...],
     remaining: Mapping[str, frozenset[str]],
 ) -> bool:
-    """Checks the paper's read-before-overwrite constraint for one base.
+    """Checks one base through circular interval and segment intersections.
 
     Paper correspondence: §4, PDF p.5, Equation (1), and §2.4, PDF pp.3-4,
     Figure 1(c)'s warning that too few empty output segments silently overwrite
     live input. The ``remaining`` test is the §5.2/Equation (2) DAG extension:
     a branch tensor cannot be overwritten before its final consumer.
     """
-    owners: dict[int, list[tuple[str, int]]] = {}
-    for tensor_name, placement in live.items():
-        for logical_byte in range(placement.size_bytes):
-            owners.setdefault(placement.physical_byte(logical_byte), []).append(
-                (tensor_name, logical_byte)
-            )
-    for output_byte, write_step in enumerate(kernel.output_first_writes):
-        physical = (output_base + output_byte) % pool_bytes
-        for tensor_name, logical_byte in owners.get(physical, ()):
-            if remaining[tensor_name] != frozenset((kernel.name,)):
-                return False
-            if tensor_name not in kernel.inputs:
-                return False
-            if kernel.reads_for(tensor_name)[logical_byte] >= write_step:
-                return False
-    return not output.is_graph_output or output_base + output.size_bytes <= pool_bytes
+    if output.is_graph_output and output_base + output.size_bytes > pool_bytes:
+        return False
+    output_spans = _physical_spans(output_base, output.size_bytes, pool_bytes)
+    for tensor_name, input_spans in live_layout:
+        reads = None
+        for output_span in output_spans:
+            for input_span in input_spans:
+                overlap_start = max(output_span.start, input_span.start)
+                overlap_end = min(output_span.end, input_span.end)
+                if overlap_start >= overlap_end:
+                    continue
+                if (
+                    remaining[tensor_name] != frozenset((kernel.name,))
+                    or tensor_name not in kernel.inputs
+                ):
+                    return False
+                if reads is None:
+                    reads = kernel.reads_for(tensor_name)
+                input_byte = input_span.logical_start + overlap_start - input_span.start
+                output_byte = (
+                    output_span.logical_start + overlap_start - output_span.start
+                )
+                bytes_left = overlap_end - overlap_start
+                while bytes_left:
+                    run_bytes = min(
+                        bytes_left,
+                        reads.next_event_change(input_byte) - input_byte,
+                    )
+                    if reads.event_at(input_byte) >= kernel.output_first_writes.minimum_event(
+                        output_byte, output_byte + run_bytes
+                    ):
+                        return False
+                    input_byte += run_bytes
+                    output_byte += run_bytes
+                    bytes_left -= run_bytes
+    return True
 
 
 @dataclass
@@ -373,6 +539,7 @@ def _search_capacity(
         )
         if greedy:
             ready = ready[:1]
+        current_layout = _live_layout(live)
         for kernel in ready:
             output = tensor_by_name[kernel.output]
             if greedy or state_limit is not None:
@@ -416,7 +583,7 @@ def _search_capacity(
                     output_base=base,
                     output=output,
                     kernel=kernel,
-                    live=live,
+                    live_layout=current_layout,
                     remaining=remaining,
                 ):
                     continue
@@ -463,12 +630,12 @@ def _search_capacity(
 
 
 def replay_compact_graph_plan(plan: CompactGraphPlan) -> None:
-    """Independently replays topology and every physical overwrite.
+    """Independently replays topology and every physical overlap.
 
     Paper correspondence: §4, PDF p.5, Equation (1), and §5.2, PDF p.6,
     Equation (2). Engineering extension: the paper relies on solved affine/ILP
-    constraints; vMCU-on-IREE replays the concrete schedule byte by byte as a
-    compiler safety proof before emission.
+    constraints; vMCU-on-IREE replays the concrete schedule by circular range
+    and activation segment as a compiler safety proof before emission.
     """
     tensor_by_name, kernel_by_name = _validate_graph(plan.tensors, plan.kernels)
     placement_by_name = {item.tensor: item for item in plan.placements}
@@ -493,7 +660,7 @@ def replay_compact_graph_plan(plan: CompactGraphPlan) -> None:
             output_base=placement.base,
             output=output,
             kernel=kernel,
-            live=live,
+            live_layout=_live_layout(live),
             remaining=remaining,
         ):
             raise ValueError(f"kernel {kernel.name!r} contains an overwrite hazard")

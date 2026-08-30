@@ -21,7 +21,7 @@ from math import prod
 from iree.compiler import ir
 from iree.compiler.dialects import arith, flow, iree_tensor_ext, scf, tensor
 
-from .compact_analysis import CompactAnalysis, MaterializedBoundary
+from .compact_analysis import CompactAnalysis, CompactBindings, MaterializedBoundary
 from .ir_utils import dense_ints, generic_io, operation, owner_operation, replace_all_uses
 from .model import (
     Conv2DMatch,
@@ -1034,6 +1034,7 @@ def emit_compact_graph(
     module: ir.Module,
     candidates: tuple[PatternMatch, ...],
     compact: CompactAnalysis,
+    bindings: CompactBindings,
 ) -> None:
     """Atomically replaces all supported activations with one tied byte pool.
 
@@ -1052,7 +1053,7 @@ def emit_compact_graph(
     }
     tensor_by_name = {item.name: item for item in compact.plan.tensors}
     boundary_by_kernel = {
-        f"kernel_{item.name}": item for item in compact.boundaries
+        f"kernel_{item.name}": item for item in bindings.boundaries
     }
     source_candidate_operations = set().union(
         *(item.claimed_operations for item in candidates)

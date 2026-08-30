@@ -58,8 +58,22 @@ The available deterministic search policies are:
 
 Planning is byte-addressed. The logical minimum is retained in the plan and the
 physical pool is rounded to 64 bytes. The final output is contiguous and does
-not cross the ring boundary. A byte-by-byte replay rejects every plan that
-writes over a still-live input segment.
+not cross the ring boundary. Circular-range/segment replay rejects every plan
+that writes over a still-live input segment.
+
+Compact planning runs only in the first, read-only parse: graph discovery,
+analytical access-event construction, schedule search, and replay produce an
+immutable plan with no MLIR handles. The transactional second parse reruns the
+semantic registry to recover live candidate and boundary values, checks their
+stable IDs, semantic signatures, and DAG/boundary signature, then replays the
+existing plan and emits it. It does not rebuild access events or search again.
+
+Conv2D, Depthwise, fully connected, and IBN lifetimes use fixed-radix execution
+coordinates rather than Python simulation of every MAC. Spatial Conv/Depthwise
+last consumers are solved by inverse stride/dilation/padding mapping once per
+input H/W coordinate; FC and IBN last reads are computed directly from their
+last output/channel coordinates. Event integers encode only the access total
+order required by the overwrite proof, not an executed-MAC count.
 
 ## Lowering and ABI
 
@@ -77,21 +91,24 @@ the pool to `Workspace`. Generated Rust therefore receives exactly one
 `BufferMut` for model I/O.
 
 Schema-v4 `vmcu.plan.json` records the virtual DAG, execution order, search
-statistics, tensor bases and ranges, per-kernel access events and workspace,
-materialization boundaries, and logical/aligned pool sizes. Flow metadata also
-records the pool and borrowed input/output offsets; the build rejects a size or
-aliasing mismatch between these two artifacts.
+statistics, tensor bases and ranges, compact grouped-affine output-write
+schedules, workspace, materialization boundaries, and logical/aligned pool
+sizes. Input last reads remain compiler-internal and are stored once per
+activation segment because they are only consumed by planning and replay. Flow
+metadata also records the pool and borrowed input/output offsets; the build
+rejects a size or aliasing mismatch between these two artifacts.
 
 ## Safety and resource accounting
 
-Initial matching is read-only. The source is reparsed and candidate identities
-and semantic facts must reproduce exactly before mutation. A compact region is
-emitted atomically and old operations are removed in reverse topological order,
-without retaining handles to deleted MLIR operations. Direct tensor-ABI test
-registries use the transactional fallback: emit one candidate, discard the
-entire analysis, normalize, run every registered analyzer again, apply the SRAM
-gate, and only then select the next candidate. Both paths verify, serialize,
-independently reparse, and verify the result again.
+Initial matching and compact planning are read-only. The source is reparsed;
+candidate identities, semantic facts, and graph boundaries must reproduce
+exactly before mutation. Only the context-free first-pass plan crosses this
+parse boundary. A compact region is emitted atomically from second-context
+handles and old operations are removed in reverse topological order. Direct
+tensor-ABI test registries use the transactional fallback: emit one candidate,
+discard the entire analysis, normalize, run every registered analyzer again,
+apply the SRAM gate, and only then select the next candidate. Both paths verify,
+serialize, independently reparse, and verify the result again.
 
 Post-lowering SRAM is reported as:
 
