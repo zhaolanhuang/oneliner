@@ -6,7 +6,7 @@ use proc_macro2::Span;
 use syn::Ident;
 
 use super::discovery::parse_query_function;
-use super::metadata::load_metadata;
+use super::metadata::{load_compact_metadata, load_metadata};
 use super::object_size::measure_object;
 use super::toolchain::{run_converter, run_iree_compile};
 use super::{ArtifactPaths, BindingArtifact, IreeArtifacts};
@@ -68,11 +68,14 @@ pub(super) fn build(
     let ir_path = ir_dump_dir.join(format!("{final_dump_stem}.10.executable-targets.mlir"));
     let flow_rs = artifact_dir.join(format!("{model_stem}.flow.rs"));
     let metadata_json = artifact_dir.join(format!("{model_stem}.flow.json"));
-    let compact_plan =
-        (final_dump_stem == "vmcu_rewritten").then(|| artifact_dir.join("vmcu.plan.json"));
-    run_converter(&ir_path, &flow_rs, &metadata_json, compact_plan.as_deref())?;
+    let compact_io = if final_dump_stem == "vmcu_rewritten" {
+        load_compact_metadata(&artifact_dir.join("vmcu.plan.json"))?
+    } else {
+        None
+    };
+    run_converter(&ir_path, &flow_rs, &metadata_json)?;
 
-    let metadata = load_metadata(&metadata_json)?;
+    let metadata = load_metadata(&metadata_json, compact_io)?;
     let input = metadata.input.ok_or_else(|| {
         syn::Error::new(
             Span::call_site(),

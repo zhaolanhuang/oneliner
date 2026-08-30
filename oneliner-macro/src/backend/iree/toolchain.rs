@@ -348,7 +348,6 @@ pub(super) fn run_converter(
     input: &Path,
     rust_output: &Path,
     json_output: &Path,
-    vmcu_plan: Option<&Path>,
 ) -> syn::Result<()> {
     let mut command = Command::new(python_executable());
     command
@@ -362,9 +361,6 @@ pub(super) fn run_converter(
         .arg(rust_output)
         .arg("--json-output")
         .arg(json_output);
-    if let Some(plan) = vmcu_plan {
-        command.arg("--vmcu-plan").arg(plan);
-    }
     run_command(&mut command, "IREE Stream/Flow converter")
 }
 

@@ -50,14 +50,27 @@ pub(super) fn expand(
     let [input_d0, input_d1, input_d2, input_d3] = artifacts.input_tensor.shape;
     let [output_d0, output_d1, output_d2, output_d3] = artifacts.output_tensor.shape;
 
-    let model_definition = match arena {
-        ArenaArg::Owned => quote! {
+    let model_definition = match (arena, artifacts.io_pool.is_some()) {
+        (ArenaArg::Owned, true) => quote! {
+            #(#struct_attrs)*
+            #struct_vis struct #struct_ident {
+                __arena: ::oneliner::runtime::OwnedArena<#module_ident::Workspace>,
+                __io_buffer: #module_ident::IoBuffer<#io_pool_size>,
+            }
+        },
+        (ArenaArg::Owned, false) => quote! {
             #(#struct_attrs)*
             #struct_vis struct #struct_ident {
                 __arena: ::oneliner::runtime::OwnedArena<#module_ident::Workspace>,
             }
         },
-        ArenaArg::Shared => quote! {
+        (ArenaArg::Shared, true) => quote! {
+            #(#struct_attrs)*
+            #struct_vis struct #struct_ident {
+                __io_buffer: #module_ident::IoBuffer<#io_pool_size>,
+            }
+        },
+        (ArenaArg::Shared, false) => quote! {
             #input_struct
         },
     };
@@ -74,8 +87,21 @@ pub(super) fn expand(
         },
     };
 
-    let model_constructor = match arena {
-        ArenaArg::Owned => quote! {
+    let model_constructor = match (arena, artifacts.io_pool.is_some()) {
+        (ArenaArg::Owned, true) => quote! {
+            impl #struct_ident {
+                /// Creates a model with an arena owned exclusively by this instance.
+                pub fn new() -> Self {
+                    Self {
+                        __arena: ::oneliner::runtime::OwnedArena::new(
+                            #module_ident::Workspace::new(),
+                        ),
+                        __io_buffer: #module_ident::IoBuffer::new(0),
+                    }
+                }
+            }
+        },
+        (ArenaArg::Owned, false) => quote! {
             impl #struct_ident {
                 /// Creates a model with an arena owned exclusively by this instance.
                 pub fn new() -> Self {
@@ -87,7 +113,17 @@ pub(super) fn expand(
                 }
             }
         },
-        ArenaArg::Shared => quote! {
+        (ArenaArg::Shared, true) => quote! {
+            impl #struct_ident {
+                /// Creates a model instance backed by the model type's shared static arena.
+                pub const fn new() -> Self {
+                    Self {
+                        __io_buffer: #module_ident::IoBuffer::new(0),
+                    }
+                }
+            }
+        },
+        (ArenaArg::Shared, false) => quote! {
             impl #struct_ident {
                 /// Creates a model instance backed by the model type's shared static arena.
                 pub const fn new() -> Self {
@@ -112,7 +148,7 @@ pub(super) fn expand(
     let execute = if artifacts.io_pool.is_some() {
         quote! {
             #(
-                #module_ident::#execute_fns(arena, io_pool_buffer)
+                #module_ident::#execute_fns(arena, inout_buffer)
                     .expect("Oneliner in-place inference dispatch failed");
             )*
         }
@@ -137,86 +173,118 @@ pub(super) fn expand(
         },
     };
 
-    let inference_impl = if artifacts.io_pool.is_some() {
+    let run_body = if artifacts.io_pool.is_some() {
         quote! {
-            impl ::oneliner::runtime::InPlaceModelInference for #struct_ident {
-                type IoBuffer = ::oneliner::runtime::VmcuIoBuffer<#io_pool_size>;
-                type InputViewMut<'a> = ::oneliner::runtime::TensorViewMut4<
-                    'a, #input_type, #input_d0, #input_d1, #input_d2, #input_d3,
-                >;
-                type OutputView<'a> = ::oneliner::runtime::TensorView4<
-                    'a, #output_type, #output_d0, #output_d1, #output_d2, #output_d3,
-                >;
+            let input_bytes = unsafe {
+                ::core::slice::from_raw_parts(
+                    input.as_ptr().cast::<u8>(),
+                    input.byte_len(),
+                )
+            };
+            self.__io_buffer.as_bytes_mut()[
+                #input_offset..#input_offset + #input_size
+            ].copy_from_slice(input_bytes);
 
-                fn create_io_buffer() -> Self::IoBuffer {
-                    Self::IoBuffer::new(0)
-                }
+            let inout_buffer = ::oneliner::runtime::BufferMut::new(
+                self.__io_buffer.as_mut_ptr(),
+                self.__io_buffer.len(),
+            );
+            #run_with_arena
 
-                fn input_view_mut<'a>(
-                    pool: &'a mut Self::IoBuffer,
-                ) -> Self::InputViewMut<'a> {
-                    let bytes = &mut pool.as_bytes_mut()[
-                        #input_offset..#input_offset + #input_size
-                    ];
-                    ::oneliner::runtime::TensorViewMut4::from_bytes(bytes)
-                }
-
-                fn run_in_place<'a>(
-                    &mut self,
-                    pool: &'a mut Self::IoBuffer,
-                ) -> Self::OutputView<'a> {
-                    let io_pool_buffer = ::oneliner::runtime::BufferMut::new(
-                        pool.as_mut_ptr(),
-                        pool.len(),
-                    );
-                    #run_with_arena
-                    let bytes = &pool.as_bytes()[
-                        #output_offset..#output_offset + #output_size
-                    ];
-                    ::oneliner::runtime::TensorView4::from_bytes(bytes)
-                }
-            }
+            let mut output = Self::OutputTensor::new(0 as #output_type);
+            let output_bytes = unsafe {
+                ::core::slice::from_raw_parts_mut(
+                    output.as_mut_ptr().cast::<u8>(),
+                    output.byte_len(),
+                )
+            };
+            output_bytes.copy_from_slice(&self.__io_buffer.as_bytes()[
+                #output_offset..#output_offset + #output_size
+            ]);
+            output
         }
     } else {
         quote! {
-            impl ::oneliner::runtime::ModelInference for #struct_ident {
-                type InputTensor = ::oneliner::runtime::Tensor<
-                    #input_type,
-                    #input_d0,
-                    #input_d1,
-                    #input_d2,
-                    #input_d3,
-                >;
-                type OutputTensor = ::oneliner::runtime::Tensor<
-                    #output_type,
-                    #output_d0,
-                    #output_d1,
-                    #output_d2,
-                    #output_d3,
-                >;
+            let input_buffer = ::oneliner::runtime::Buffer::new(
+                input.as_ptr().cast::<u8>(),
+                input.byte_len(),
+            );
 
-                fn create_input_tensor() -> Self::InputTensor {
-                    Self::InputTensor::new(0 as #input_type)
-                }
+            let mut output = Self::OutputTensor::new(0 as #output_type);
+            let output_buffer = ::oneliner::runtime::BufferMut::new(
+                output.as_mut_ptr().cast::<u8>(),
+                output.byte_len(),
+            );
 
-                fn run(&mut self, input: &Self::InputTensor) -> Self::OutputTensor {
-                    let input_buffer = ::oneliner::runtime::Buffer::new(
-                        input.as_ptr().cast::<u8>(),
-                        input.byte_len(),
-                    );
+            #run_with_arena
+            output
+        }
+    };
 
-                    let mut output = Self::OutputTensor::new(0 as #output_type);
-                    let output_buffer = ::oneliner::runtime::BufferMut::new(
-                        output.as_mut_ptr().cast::<u8>(),
-                        output.byte_len(),
-                    );
+    let inference_impl = quote! {
+        impl ::oneliner::runtime::ModelInference for #struct_ident {
+            type InputTensor = ::oneliner::runtime::Tensor<
+                #input_type,
+                #input_d0,
+                #input_d1,
+                #input_d2,
+                #input_d3,
+            >;
+            type OutputTensor = ::oneliner::runtime::Tensor<
+                #output_type,
+                #output_d0,
+                #output_d1,
+                #output_d2,
+                #output_d3,
+            >;
 
-                    #run_with_arena
-                    output
-                }
+            fn create_input_tensor() -> Self::InputTensor {
+                Self::InputTensor::new(0 as #input_type)
+            }
+
+            fn run(&mut self, input: &Self::InputTensor) -> Self::OutputTensor {
+                #run_body
             }
         }
     };
+
+    let io_buffer_definition = artifacts.io_pool.is_some().then(|| {
+        quote! {
+            pub(super) struct IoBuffer<const N: usize> {
+                storage: Aligned<AlignedType, [u8; N]>,
+            }
+
+            impl<const N: usize> IoBuffer<N> {
+                pub(super) const fn new(value: u8) -> Self {
+                    Self {
+                        storage: Aligned([value; N]),
+                    }
+                }
+
+                pub(super) fn as_bytes(&self) -> &[u8] {
+                    &self.storage[..]
+                }
+
+                pub(super) fn as_bytes_mut(&mut self) -> &mut [u8] {
+                    &mut self.storage[..]
+                }
+
+                pub(super) fn as_mut_ptr(&mut self) -> *mut u8 {
+                    self.as_bytes_mut().as_mut_ptr()
+                }
+
+                pub(super) const fn len(&self) -> usize {
+                    N
+                }
+            }
+
+            impl<const N: usize> Default for IoBuffer<N> {
+                fn default() -> Self {
+                    Self::new(0)
+                }
+            }
+        }
+    });
 
     quote! {
         #model_definition
@@ -258,6 +326,8 @@ pub(super) fn expand(
             }
 
             static QUERY_FN_PTR: iree_hal_executable_library_query_fn_t = #query_fn;
+
+            #io_buffer_definition
 
             include!(#flow_rs);
 

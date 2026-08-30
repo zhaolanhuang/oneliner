@@ -414,13 +414,15 @@ def infer_external_roles(bindings: list[ResourceBinding], commands: list[Any]) -
             access_by_arg.setdefault(item.arg, set()).add(item.access)
 
     for binding in bindings:
-        if binding.kind != "external" or binding.role != "external":
+        if binding.kind != "external":
             continue
         accesses = access_by_arg.get(binding.arg, set())
         has_read = bool(accesses & {"ro", "rw"})
         has_write = bool(accesses & {"wo", "rw"})
         if has_read and has_write:
             binding.role = "inout"
+        elif binding.role != "external":
+            continue
         elif has_write:
             binding.role = "output"
         elif has_read:
@@ -1018,125 +1020,6 @@ def parse_cmd_executes(text: str) -> tuple[list[CmdExecute], dict[str, ConstantB
     return StructuredStreamParser(text).parse()
 
 
-def load_compact_plan(path: Path) -> dict[str, Any]:
-    document = json.loads(path.read_text(encoding="utf-8"))
-    if document.get("schema_version") != 4:
-        raise StreamExtractionError("compact vMCU conversion requires plan schema v4")
-    compact = document.get("compact_graph")
-    if not isinstance(compact, dict):
-        raise StreamExtractionError("vMCU plan has no compact_graph")
-    return compact
-
-
-def _collapse_commands_to_pool(
-    commands: list[Any], input_arg: str, output_arg: str, pool_name: str, pool_size: int
-) -> tuple[list[Any], int]:
-    collapsed: list[Any] = []
-    removed_copies = 0
-    for command in commands:
-        if isinstance(command, CopyCommand):
-            if (
-                command.source.arg == input_arg
-                and command.target.arg == output_arg
-                and command.source.offset == 0
-                and command.target.offset == 0
-                and command.source.length == pool_size
-                and command.target.length == pool_size
-            ):
-                removed_copies += 1
-                continue
-        if isinstance(command, ConcurrentCommand):
-            command.commands, child_count = _collapse_commands_to_pool(
-                command.commands, input_arg, output_arg, pool_name, pool_size
-            )
-            removed_copies += child_count
-        for item in command_ranges(command):
-            if item.arg in {input_arg, output_arg}:
-                item.arg = input_arg
-                item.tensor_name = pool_name
-        collapsed.append(command)
-    return collapsed, removed_copies
-
-
-def collapse_compact_io_pool(
-    executes: list[CmdExecute], compact: dict[str, Any]
-) -> None:
-    """Folds Stream input/output resources into one physical inout pool.
-
-    This preserves vMCU §4's shared circular input/output pool after IREE Stream
-    lowering. Detecting and removing a compiler-inserted full-pool copy is the
-    IREE/Rust ABI adaptation of that model; Stream resources are not part of
-    the paper. Every resulting range is checked against the schema-v4 pool size
-    before generated Rust is allowed to alias the resource.
-    """
-    pool_size = compact.get("allocated_pool_bytes")
-    if not isinstance(pool_size, int) or pool_size <= 0:
-        raise StreamExtractionError("invalid compact_graph allocated_pool_bytes")
-    removed_copies = 0
-    already_in_place = 0
-    for execute in executes:
-        inputs = [
-            item
-            for item in execute.resources
-            if item.kind == "external" and item.role == "input" and item.size == pool_size
-        ]
-        outputs = [
-            item
-            for item in execute.resources
-            if item.kind == "external" and item.role == "output" and item.size == pool_size
-        ]
-        if len(inputs) == 1 and not outputs:
-            input_binding = inputs[0]
-            pool_ranges = [
-                item
-                for command in execute.commands
-                for item in command_ranges(command)
-                if item.arg == input_binding.arg
-            ]
-            if not pool_ranges or not any(item.access in {"wo", "rw"} for item in pool_ranges):
-                raise StreamExtractionError(
-                    "single compact pool resource is not written by the execute"
-                )
-            if any(
-                item.offset is None
-                or item.length is None
-                or item.offset < 0
-                or item.offset + item.length > pool_size
-                for item in pool_ranges
-            ):
-                raise StreamExtractionError(
-                    "single compact pool resource has an out-of-range access"
-                )
-            input_binding.role = "inout"
-            pool_name = binding_name(input_binding)
-            for item in pool_ranges:
-                item.tensor_name = pool_name
-            already_in_place += 1
-            continue
-        if len(inputs) != 1 or len(outputs) != 1:
-            raise StreamExtractionError(
-                "compact Stream must expose one pool-sized in-place resource or one input/output pair"
-            )
-        input_binding, output_binding = inputs[0], outputs[0]
-        input_binding.role = "inout"
-        pool_name = binding_name(input_binding)
-        execute.commands, count = _collapse_commands_to_pool(
-            execute.commands,
-            input_binding.arg,
-            output_binding.arg,
-            pool_name,
-            pool_size,
-        )
-        removed_copies += count
-        execute.resources = [
-            item for item in execute.resources if item is not output_binding
-        ]
-    if removed_copies + already_in_place != len(executes):
-        raise StreamExtractionError(
-            "compact Stream pool folding did not cover every execute"
-        )
-
-
 def bytes_to_rust_array(data: bytes, indent: str = "    ", per_line: int = 16) -> list[str]:
     lines: list[str] = []
     for start in range(0, len(data), per_line):
@@ -1206,7 +1089,7 @@ def render_tensor_range(
     elif role == "output":
         storage = "output"
     elif role == "inout":
-        storage = "io_pool"
+        storage = "inout"
     else:
         storage = f"(*{storage_name}).to_buffer_ref()"
     return (
@@ -1247,7 +1130,7 @@ def render_command(
         rendered = render_tensor_range(command.target, workspace_names, external_roles)
         out.append(f"{indent}unsafe {{ fill({rendered}, {command.value})?; }}")
     elif isinstance(command, CopyCommand):
-        raise StreamExtractionError("non-vMCU stream.cmd.copy is unsupported")
+        raise StreamExtractionError("stream.cmd.copy is unsupported")
     elif isinstance(command, ConcurrentCommand):
         out.append(f"{indent}concurrent(|| {{")
         for child in command.commands:
@@ -1327,7 +1210,7 @@ def render_rust(executes: list[CmdExecute], constant_blobs: dict[str, ConstantBl
                 item.role in {"input", "output"} for item in execute.resources
             ):
                 raise StreamExtractionError("in-place execute must expose one external pool")
-            signature = "workspace: &mut Workspace, io_pool: BufferMut"
+            signature = "workspace: &mut Workspace, inout: BufferMut"
         else:
             signature = "workspace: &mut Workspace, input: Buffer, output: BufferMut"
         out.append(
@@ -1366,11 +1249,9 @@ def dataclass_to_json(value: Any) -> Any:
     return value
 
 
-def render_metadata_json(
-    executes: list[CmdExecute], compact: dict[str, Any] | None = None
-) -> str:
+def render_metadata_json(executes: list[CmdExecute]) -> str:
     document = {
-        "schema_version": 2 if compact is not None else 1,
+        "schema_version": 1,
         "cmd_executes": [
             {
                 "name": execute.name,
@@ -1387,34 +1268,6 @@ def render_metadata_json(
             for execute in executes
         ],
     }
-    if compact is not None:
-        tensors = compact.get("tensors", [])
-        placements = {
-            item["tensor"]: item for item in compact.get("placements", [])
-        }
-        inputs = [item for item in tensors if item.get("is_graph_input")]
-        outputs = [item for item in tensors if item.get("is_graph_output")]
-        if len(inputs) != 1 or len(outputs) != 1:
-            raise StreamExtractionError("compact plan must have one input and one output")
-        input_tensor, output_tensor = inputs[0], outputs[0]
-        input_placement = placements.get(input_tensor["name"])
-        output_placement = placements.get(output_tensor["name"])
-        if input_placement is None or output_placement is None:
-            raise StreamExtractionError("compact I/O tensor placement is missing")
-        document["io_pool"] = {
-            "logical_bytes": compact["logical_pool_bytes"],
-            "allocated_bytes": compact["allocated_pool_bytes"],
-            "input_view": {
-                "offset": input_placement["base"],
-                "size": input_tensor["size_bytes"],
-                "shape": input_tensor["shape"],
-            },
-            "output_view": {
-                "offset": output_placement["base"],
-                "size": output_tensor["size_bytes"],
-                "shape": output_tensor["shape"],
-            },
-        }
     return json.dumps(document, indent=2) + "\n"
 
 
@@ -1425,9 +1278,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--format", choices=("rust", "json"), default="rust")
     parser.add_argument("--rust-output", type=Path, help="Write generated Rust to this file")
     parser.add_argument("--json-output", type=Path, help="Write generated metadata JSON to this file")
-    parser.add_argument(
-        "--vmcu-plan", type=Path, help="Schema v4 plan used to collapse tied external I/O"
-    )
     args = parser.parse_args(argv)
 
     if args.output and (args.rust_output or args.json_output):
@@ -1436,18 +1286,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         text = args.input.read_text(encoding="utf-8")
         executes, constant_blobs = parse_cmd_executes(text)
-        compact = load_compact_plan(args.vmcu_plan) if args.vmcu_plan else None
-        if compact is not None:
-            collapse_compact_io_pool(executes, compact)
         rust_rendered = render_rust(executes, constant_blobs)
 
         if args.rust_output or args.json_output:
             if args.rust_output:
                 args.rust_output.write_text(rust_rendered, encoding="utf-8")
             if args.json_output:
-                args.json_output.write_text(
-                    render_metadata_json(executes, compact), encoding="utf-8"
-                )
+                args.json_output.write_text(render_metadata_json(executes), encoding="utf-8")
             return 0
 
         rendered = (

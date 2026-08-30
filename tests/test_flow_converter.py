@@ -23,7 +23,6 @@ REAL_VMCU_DUMP = (
     / "iree-ir-dumps"
     / "vmcu_rewritten.10.executable-targets.mlir"
 )
-REAL_VMCU_PLAN = REAL_VMCU_DUMP.parents[1] / "vmcu.plan.json"
 DISPATCH = """      stream.cmd.dispatch @main_dispatch_0::@static::@main_dispatch_0_elementwise_2_f32 {
         ro %arg1[%c0 for %c8] : !stream.resource<external>{%c8},
         wo %arg2[%c0 for %c8] : !stream.resource<external>{%c8}
@@ -161,16 +160,11 @@ class FlowConverterTests(unittest.TestCase):
         ):
             CONVERTER.parse_cmd_executes(text.replace(DISPATCH, discard, 1))
 
-    @unittest.skipUnless(
-        REAL_VMCU_DUMP.is_file() and REAL_VMCU_PLAN.is_file(),
-        "real vMCU Flow dump and schema-v4 plan are required",
-    )
-    def test_compact_io_collapses_external_copy_to_one_inout_pool(self):
+    @unittest.skipUnless(REAL_VMCU_DUMP.is_file(), "real inout Flow dump is required")
+    def test_external_read_write_resource_is_inout(self):
         executes, constants = CONVERTER.parse_cmd_executes(
             REAL_VMCU_DUMP.read_text(encoding="utf-8")
         )
-        compact = CONVERTER.load_compact_plan(REAL_VMCU_PLAN)
-        CONVERTER.collapse_compact_io_pool(executes, compact)
         external = [
             item
             for execute in executes
@@ -178,9 +172,8 @@ class FlowConverterTests(unittest.TestCase):
             if item.kind == "external"
         ]
         self.assertEqual([(item.role, item.size) for item in external], [("inout", 16960)])
-        self.assertNotIn("CopyCommand", repr(executes))
         rendered = CONVERTER.render_rust(executes, constants)
-        self.assertIn("io_pool: BufferMut", rendered)
+        self.assertIn("inout: BufferMut", rendered)
         self.assertNotIn("input: Buffer, output: BufferMut", rendered)
 
     def test_structured_parser_parses_concurrent_fill(self):

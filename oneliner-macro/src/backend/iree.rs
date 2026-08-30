@@ -95,15 +95,15 @@ pub fn expand(
     );
     if io_pool_size != 0 {
         eprintln!(
-            "  RAM Usage: io_pool = {} B ({} KiB), transient arena = {} B ({} KiB)",
+            "  RAM Usage: io_pool = {} B ({} KiB), transient arena = {} B ({} KiB), input = {} B ({} KiB), output = {} B ({} KiB)",
             io_pool_size,
             io_pool_size / 1024,
             ram_size,
             ram_size / 1024,
-        );
-        eprintln!(
-            "  Logical pool views: input = {} B, output = {} B (not additional RAM)",
-            input_size, output_size,
+            input_size,
+            input_size / 1024,
+            output_size,
+            output_size / 1024,
         );
     } else {
         eprintln!(

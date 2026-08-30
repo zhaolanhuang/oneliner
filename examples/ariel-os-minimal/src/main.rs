@@ -6,7 +6,7 @@ use ariel_os::log::{error, info};
 use ariel_os::time;
 
 use oneliner::model;
-use oneliner::runtime::{InPlaceModelInference, ModelSource};
+use oneliner::runtime::{ModelInference, ModelSource};
 
 #[model(
     "../models/mcunet-10fps_vww.tflite",
@@ -18,7 +18,11 @@ use oneliner::runtime::{InPlaceModelInference, ModelSource};
 struct Model;
 const EXPECTED: [i8; 2] = [4, -5];
 
-// #[model("../models/lenet5_quantized.tflite", vmcu = "auto")]
+// #[model(
+//     "../models/lenet5_quantized.tflite",
+//     vmcu = "auto",
+//     vmcu_schedule = "greedy"
+// )]
 // struct Model;
 // const INPUT_LEN: usize = 28 * 28 * 1;
 // const OUTPUT_LEN: usize = 10;
@@ -42,13 +46,10 @@ fn main() {
     );
 
     let mut model = Model::new();
-    let mut io_pool = Model::create_io_buffer();
-    {
-        let mut input = Model::input_view_mut(&mut io_pool);
-        input.fill(7);
-    }
+    let mut input = Model::create_input_tensor();
+    input.fill(7);
     let time_begin_us = time::Instant::now().as_micros();
-    let output = model.run_in_place(&mut io_pool);
+    let output = model.run(&input);
     let time_end_us = time::Instant::now().as_micros();
     info!("Model inference time: {:?} us", time_end_us - time_begin_us);
 

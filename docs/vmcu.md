@@ -23,11 +23,11 @@ This pipeline runs between IREE's `preprocessing` and dispatch-creation phases:
 struct MyModel;
 ```
 
-`vmcu = "off"` retains the regular immutable `ModelInference` API. `auto` and
-`strict` use the destructive `InPlaceModelInference` API and one
-`VmcuIoBuffer`: the caller fills the borrowed input view, calls
-`run_in_place`, and consumes the returned borrowed output view. The output view
-must be dropped before the same pool can be modified or used for another run.
+All modes implement the same `ModelInference` API. In `auto` and `strict`, the
+generated model instance owns the compact I/O pool: `run` copies the owned
+input tensor into its planned input view, executes in place, and copies the
+planned output view into the returned owned output tensor. The pool is not
+exposed to callers.
 
 ## Planning
 
@@ -85,18 +85,19 @@ kernels accumulate locally and write directly to their planned output base;
 they do not return full intermediate activation tensors.
 
 The public MLIR boundary is one pool tensor in and the same tied pool tensor
-out. The Flow converter validates the import/export pair, folds it to one
-external `inout` resource, removes the full-pool wrapper copy, and does not add
-the pool to `Workspace`. Generated Rust therefore receives exactly one
-`BufferMut` for model I/O.
+out. IREE lowers this to one external resource that is both read and written.
+The generic Flow converter infers its `inout` role solely from those accesses
+and does not read a vMCU plan. The Rust build layer reads schema-v4 pool/view
+metadata and validates it against that external resource. The pool is not
+added to `Workspace`; generated Rust receives exactly one `BufferMut`.
 
 Schema-v4 `vmcu.plan.json` records the virtual DAG, execution order, search
 statistics, tensor bases and ranges, compact grouped-affine output-write
 schedules, workspace, materialization boundaries, and logical/aligned pool
 sizes. Input last reads remain compiler-internal and are stored once per
 activation segment because they are only consumed by planning and replay. Flow
-metadata also records the pool and borrowed input/output offsets; the build
-rejects a size or aliasing mismatch between these two artifacts.
+metadata remains backend-generic; the Rust build combines it with the plan and
+rejects a pool size, logical view, or aliasing mismatch.
 
 ## Safety and resource accounting
 
@@ -115,6 +116,11 @@ Post-lowering SRAM is reported as:
 ```text
 aligned I/O pool + unsupported Stream transient arena + object maximum stack
 ```
+
+This is the compiler-managed deployment footprint. The current unified
+`ModelInference` wrapper additionally keeps the caller-owned input and returned
+output tensors live while `run` copies them into and out of the model-owned
+pool. Those interface tensors are shown separately in the Rust build report.
 
 Local B/C/D workspace is reported separately but is not added twice when it is
 already resident in the measured object stack. `vmcu_sram` is a deployment
