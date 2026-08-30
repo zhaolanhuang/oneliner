@@ -1,5 +1,10 @@
 # vMCU compact activation scheduling
 
+The paper-to-source index in [vmcu-paper-map.md](vmcu-paper-map.md) records the
+exact section, PDF page, figure/equation, and current source line for each
+implemented paper concept. It also marks repository-specific extensions and
+paper optimizations that are not yet implemented.
+
 vMCU minimizes activation RAM by scheduling reads and writes at activation-
 segment granularity. Each virtual tensor records its producer, all consumers,
 segment size, last-read events, and first-write events. The planner chooses a

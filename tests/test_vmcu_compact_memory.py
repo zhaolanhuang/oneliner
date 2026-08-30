@@ -20,7 +20,8 @@ from oneliner_vmcu.schedules import InvertedBottleneckSegmentSchedule  # noqa: E
 
 
 def _paper_fc_graph():
-    # Figure 3: M=2, K=3, N=2. Each scalar is one logical segment.
+    # vMCU §2.4 Figure 1(c) and §4 Figure 3 (PDF pp.3–5): M=2, K=3,
+    # N=2. Each scalar is one logical segment in this executable paper example.
     tensors = (
         VirtualTensor("input", 6, None, ("fc",), is_graph_input=True),
         VirtualTensor("output", 4, "fc", (), is_graph_output=True),
@@ -41,6 +42,7 @@ def _paper_fc_graph():
 
 class CompactMemoryTests(unittest.TestCase):
     def test_paper_gemm_uses_seven_segments(self):
+        """Checks vMCU §4 Figure 3 and its closed-form pool-size formula."""
         tensors, kernels = _paper_fc_graph()
         plan = plan_compact_graph(
             tensors, kernels, search_mode=ScheduleSearchMode.OPTIMAL, alignment=1
@@ -50,6 +52,7 @@ class CompactMemoryTests(unittest.TestCase):
         replay_compact_graph_plan(plan)
 
     def test_paper_gemm_rejects_a_six_segment_early_overwrite(self):
+        """Checks the overwrite hazard in vMCU §2.4 Figure 1(c) (PDF pp.3–4)."""
         tensors, kernels = _paper_fc_graph()
         plan = plan_compact_graph(
             tensors, kernels, search_mode=ScheduleSearchMode.OPTIMAL, alignment=1
@@ -67,12 +70,14 @@ class CompactMemoryTests(unittest.TestCase):
             replay_compact_graph_plan(unsafe)
 
     def test_segment_lifetime_is_maximum_element_lifetime(self):
+        """Checks the segment-lifetime definition in vMCU Introduction (PDF p.2)."""
         self.assertEqual(
             segment_last_reads((0, 3, 1, 2, 9), 2),
             (3, 3, 2, 2, 9),
         )
 
     def test_diamond_preserves_input_until_its_last_consumer(self):
+        """Checks the graph constraint from vMCU §5.2 Equation (2) (PDF p.6)."""
         tensors = (
             VirtualTensor("input", 4, None, ("left", "right"), is_graph_input=True),
             VirtualTensor("left_value", 3, "left", ("join",)),
@@ -99,6 +104,7 @@ class CompactMemoryTests(unittest.TestCase):
         self.assertGreaterEqual(plan.logical_pool_bytes, 7)
 
     def test_search_modes_are_deterministic_and_safe(self):
+        """Checks repository search extensions against vMCU §4's safety rule."""
         tensors, kernels = _paper_fc_graph()
         footprints = {}
         for mode in ScheduleSearchMode:
@@ -125,6 +131,7 @@ class CompactMemoryTests(unittest.TestCase):
         replay_compact_graph_plan(bounded)
 
     def test_ibn_workspace_is_kernel_squared_plus_two(self):
+        """Checks vMCU §5.2 Figure 6's 11 segments and the K²+2 extension."""
         expected = {3: 11, 5: 27, 7: 51}
         for kernel, segments in expected.items():
             schedule = InvertedBottleneckSegmentSchedule(16, 48, 24, kernel, kernel)

@@ -1,4 +1,17 @@
-"""Static byte-accurate circular activation-pool planning for vMCU."""
+"""Static byte-accurate circular activation-pool planning for vMCU.
+
+Paper correspondence (vMCU, MLSys 2024):
+  * §2.4, PDF pp.3-4, Figure 1(c): partial input/output overlap and the
+    seven-segment GEMM example.
+  * §4, PDF pp.4-5, Equation (1): circular segment pool, row-major address
+    mapping, input/output base offsets, and the no-overwrite constraint.
+  * §5.2, PDF p.6, Equation (2): extending the overwrite constraint across a
+    producer-consumer graph.
+
+Engineering extension: the paper formulates offset selection as ILP and gives
+an informal graph generalization. This module instead performs deterministic
+greedy/bounded/exhaustive DAG search and independently replays every byte.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +23,11 @@ from .memory import align_up
 
 
 class ScheduleSearchMode(str, Enum):
-    """Search policies exposed by the Python and Rust build interfaces."""
+    """Search policies exposed by the Python and Rust build interfaces.
+
+    These modes are engineering alternatives to the ILP formulation suggested
+    in vMCU §4 (PDF p.5); the paper does not define bounded/optimal/greedy modes.
+    """
 
     BOUNDED = "bounded"
     OPTIMAL = "optimal"
@@ -19,7 +36,12 @@ class ScheduleSearchMode(str, Enum):
 
 @dataclass(frozen=True)
 class VirtualTensor:
-    """One static activation represented as circular logical bytes."""
+    """One static activation represented as circular logical bytes.
+
+    Paper correspondence: §4, PDF p.4, ``Pool[MemCap / Seg]`` and the
+    row-major tensor-to-pool address formulation. ``producer``/``consumers``
+    are the graph form of §5.2, PDF p.6, ``G=(V,E)``.
+    """
 
     name: str
     size_bytes: int
@@ -59,6 +81,12 @@ class KernelAccessSchedule:
 
     Event arrays are byte addressed. Callers raise element lifetimes to the
     maximum lifetime of their segment before constructing this object.
+
+    Paper correspondence: §4, PDF pp.4-5, iteration instances ``S[i]``, affine
+    access functions, row-major linear addresses, and Equation (1)'s ordering
+    constraint. The explicit event arrays are this implementation's executable
+    representation of those affine relations, not a data structure prescribed
+    by the paper.
     """
 
     name: str
@@ -109,7 +137,11 @@ class KernelAccessSchedule:
 
 @dataclass(frozen=True)
 class TensorPlacement:
-    """One virtual tensor's base in a circular byte pool."""
+    """One virtual tensor's base in a circular byte pool.
+
+    Paper correspondence: §4, PDF p.5, input/output offsets ``bIn`` and
+    ``bOut``. ``base`` is the physical realization of one such offset.
+    """
 
     tensor: str
     base: int
@@ -212,7 +244,13 @@ class CompactGraphPlan:
 def segment_last_reads(
     element_last_reads: Iterable[int], segment_bytes: int
 ) -> tuple[int, ...]:
-    """Uses the maximum element lifetime for every byte in one segment."""
+    """Uses the maximum element lifetime for every byte in one segment.
+
+    Paper correspondence: Introduction, PDF p.2, paragraph beginning "the data
+    elements in input tensors may have different lifetime": segment lifetime
+    is defined as the maximum lifetime of its elements. Section 5.3, PDF p.7,
+    discusses the footprint/latency trade-off controlled by segment size.
+    """
     events = tuple(element_last_reads)
     if not events or segment_bytes <= 0 or min(events) < 0:
         raise ValueError("segment lifetime inputs must be non-empty and non-negative")
@@ -263,6 +301,13 @@ def _safe_output_base(
     live: Mapping[str, TensorPlacement],
     remaining: Mapping[str, frozenset[str]],
 ) -> bool:
+    """Checks the paper's read-before-overwrite constraint for one base.
+
+    Paper correspondence: §4, PDF p.5, Equation (1), and §2.4, PDF pp.3-4,
+    Figure 1(c)'s warning that too few empty output segments silently overwrite
+    live input. The ``remaining`` test is the §5.2/Equation (2) DAG extension:
+    a branch tensor cannot be overwritten before its final consumer.
+    """
     owners: dict[int, list[tuple[str, int]]] = {}
     for tensor_name, placement in live.items():
         for logical_byte in range(placement.size_bytes):
@@ -418,7 +463,13 @@ def _search_capacity(
 
 
 def replay_compact_graph_plan(plan: CompactGraphPlan) -> None:
-    """Independently replays topology and every physical overwrite."""
+    """Independently replays topology and every physical overwrite.
+
+    Paper correspondence: §4, PDF p.5, Equation (1), and §5.2, PDF p.6,
+    Equation (2). Engineering extension: the paper relies on solved affine/ILP
+    constraints; vMCU-on-IREE replays the concrete schedule byte by byte as a
+    compiler safety proof before emission.
+    """
     tensor_by_name, kernel_by_name = _validate_graph(plan.tensors, plan.kernels)
     placement_by_name = {item.tensor: item for item in plan.placements}
     graph_input = next(item for item in plan.tensors if item.is_graph_input)
@@ -465,7 +516,15 @@ def plan_compact_graph(
     search_state_limit: int = 1_000_000,
     alignment: int = 64,
 ) -> CompactGraphPlan:
-    """Finds the smallest verified pool reached by the selected search mode."""
+    """Finds the smallest verified pool reached by the selected search mode.
+
+    Paper correspondence: §4, PDF p.5, minimizes ``bIn-bOut`` under Equation
+    (1), and derives ``max(MN,MK)+min(N,K)-1`` for GEMM/Figure 3.
+
+    Engineering extension: ``greedy``, ``bounded``, and ``optimal`` are not
+    algorithms named by the paper. They replace its ILP suggestion with an
+    explicit DAG topology/base search suitable for this compiler pipeline.
+    """
     tensor_items = tuple(tensors)
     kernel_items = tuple(kernels)
     _validate_graph(tensor_items, kernel_items)

@@ -20,6 +20,10 @@ pub type Tensor<T, const D1: usize, const D2: usize, const D3: usize, const D4: 
 
 /// One aligned byte pool shared by a vMCU model's logical input, activations,
 /// and logical output.
+///
+/// This is the runtime representation of the circular memory pool in vMCU
+/// §4 (PDF pp.4–5). Its byte length is the compiler-selected `MemCap`; logical
+/// tensor bases and modulo addressing remain generated-code responsibilities.
 pub struct VmcuIoBuffer<const N: usize> {
     storage: Aligned<AlignedType, [u8; N]>,
 }
@@ -236,6 +240,11 @@ pub trait ModelInference {
 }
 
 /// In-place inference over one compact vMCU activation/I/O pool.
+///
+/// The shared input/output storage corresponds to vMCU §4. Rust's mutable
+/// borrow during execution and immutable borrowed output view are an ABI safety
+/// extension: they prevent another run from overwriting the returned logical
+/// output while it is still observed by the caller.
 pub trait InPlaceModelInference {
     type IoBuffer;
     type InputViewMut<'a>

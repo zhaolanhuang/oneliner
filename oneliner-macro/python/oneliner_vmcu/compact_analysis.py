@@ -1,4 +1,14 @@
-"""Builds a byte-addressed compact activation DAG from semantic matches."""
+"""Builds a byte-addressed compact activation DAG from semantic matches.
+
+Paper correspondence (vMCU, MLSys 2024): §3 (PDF p.4) separates memory
+management, segment-aware kernels, and compiler support; §4 (PDF pp.4-5)
+defines iteration/access functions and offset constraints; §5.2 (PDF pp.6-7,
+Figure 6 and Equation (2)) generalizes scheduling to multi-layer graphs.
+
+Engineering extension: the paper demonstrates selected linear/fused modules.
+This analysis recovers a static DAG from MLIR SSA, folds no-copy views and
+padding, and represents unsupported/directly-scalarizable boundaries explicitly.
+"""
 
 from __future__ import annotations
 
@@ -93,7 +103,13 @@ _DIRECT_SCALAR_OPERATIONS = frozenset(
 def _direct_boundary_kind(
     target: ir.Value, sources: frozenset[ir.Value]
 ) -> str | None:
-    """Recognizes scalarizable identity residual trees and terminal pooling."""
+    """Recognizes scalarizable identity residual trees and terminal pooling.
+
+    Paper correspondence: §5.2, PDF pp.6-7, Figure 6 includes the residual add
+    in the fused inverted bottleneck and Equation (2) covers graph edges.
+    Engineering extension: generic identity-map residual trees and terminal
+    pooling are broader than the concrete fused kernel described by the paper.
+    """
     visiting: set[ir.Value] = set()
 
     def visit(value: ir.Value) -> tuple[bool, bool]:
@@ -235,6 +251,13 @@ def _conv_events(
     *,
     depthwise: bool,
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Simulates Conv2D segment reads/writes in emitter execution order.
+
+    Paper correspondence: §4, PDF pp.4-5, iteration domain/access functions and
+    Equation (1); §5.1, PDF pp.5-6, Figure 5's two-level Conv2D kernel. The
+    timestamps are an implementation-specific lowering of the paper's affine
+    ordering constraint.
+    """
     reads = [-1] * prod(input_shape)
     writes = [0] * prod(output_shape)
     step = 0
@@ -266,6 +289,13 @@ def _ibn_events(
     candidate: InvertedBottleneckMatch,
     input_shape: tuple[int, int, int, int],
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Simulates the fused inverted-bottleneck access sequence.
+
+    Paper correspondence: §5.2, PDF pp.6-7, Figure 6: load A patches, produce
+    ``K×K`` B segments, reduce to one C segment, accumulate D, add residual A,
+    and store E. The paper's 3×3 case uses 11=9+1+1 workspace segments; this
+    implementation generalizes the same schedule to ``K²+2``.
+    """
     output_shape = candidate.output_shape
     depthwise = candidate.depthwise
     kernel_h, kernel_w = depthwise.weight_shape[:2]
@@ -314,6 +344,11 @@ def _ibn_events(
 
 
 def _fc_events(candidate: FullyConnectedMatch) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Simulates fully-connected segment reads and output writes.
+
+    Paper correspondence: §2.4, PDF p.3, Figure 1(c); §4, PDF p.5, Figure 3 and
+    the GEMM minimum-footprint derivation; §5.1, PDF pp.5-6, Figure 4.
+    """
     reads = [0] * (candidate.rows * candidate.input_channels)
     writes = [0] * prod(candidate.output_shape)
     step = 0
@@ -383,7 +418,21 @@ def build_compact_analysis(
     search_mode: ScheduleSearchMode | str,
     search_state_limit: int,
 ) -> CompactAnalysis:
-    """Builds and verifies a single fully-supported compact model region."""
+    """Builds and solves one compact model region from semantic MLIR matches.
+
+    Paper correspondence:
+      * §3, PDF p.4, Figure 2: coordinates compiler, memory manager, and kernel
+        schedule instead of treating them as independent components.
+      * §4, PDF pp.4-5, Equation (1): creates virtual tensors plus read/write
+        events needed to solve input/output offsets.
+      * §5.2, PDF p.6, Equation (2): builds producer-consumer graph constraints.
+      * §5.3, PDF p.7: assigns kernel-dependent segment widths.
+
+    Engineering extension: MLIR SSA recovery, arbitrary static-DAG boundaries,
+    search modes, and replay verification are additions in this implementation.
+    The paper proposes ILP for the single-layer formulation and a specialized
+    inverted-bottleneck schedule rather than this general graph extractor.
+    """
     candidates = tuple(
         sorted(
             analysis.matches,
@@ -485,6 +534,9 @@ def build_compact_analysis(
             input_shape = next(
                 item.output_shape for item in boundaries.values() if item.name == input_name
             )
+        # vMCU §5.3 (PDF p.7): Conv/IBN segment width is min(input channels,
+        # output channels), while depthwise uses its channel width. Event
+        # generation above lifts that kernel-specific choice into §4 lifetimes.
         reads, writes, output_shape, segment_bytes = _candidate_events(candidate, input_shape)
         reads = segment_last_reads(reads, segment_bytes)
         output_name = tensor_names[candidate_id]
@@ -504,6 +556,9 @@ def build_compact_analysis(
             )
         )
     for boundary in boundaries.values():
+        # Engineering extension to vMCU §5.2/Equation (2): unknown graph regions
+        # get a conservative read-all-then-write schedule. Direct residual and
+        # pooling emitters may execute more finely, but never violate this proof.
         boundary_name = boundary.name
         source_names = boundary.source_tensors
         boundary_shape = boundary.output_shape
@@ -578,6 +633,7 @@ def build_compact_analysis(
                 is_graph_output=boundary_name == terminal[0],
             )
         )
+    # Solves §4's bIn/bOut placement problem, generalized to the §5.2 DAG.
     plan = plan_compact_graph(
         tensors,
         kernels,

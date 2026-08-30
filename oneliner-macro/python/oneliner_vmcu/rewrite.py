@@ -1,4 +1,11 @@
-"""Transactional analysis and rewrite driver."""
+"""Transactional analysis and rewrite driver.
+
+Paper correspondence: this module is the compiler-integration layer described
+by vMCU §3 Figure 2 and §6 (PDF pp.4, 7). It invokes graph-level memory
+planning before kernel code generation. Reparse/re-analysis, immutable semantic
+signatures, MLIR verification, schema-v4 diagnostics, and rollback-by-not-
+publishing are repository safety mechanisms rather than paper algorithms.
+"""
 
 from __future__ import annotations
 
@@ -238,6 +245,11 @@ def rewrite_text(
     search_state_limit: int = 1_000_000,
 ) -> RewriteResult:
     """Analyzes and transactionally rewrites preprocessing-phase MLIR.
+
+    ``build_compact_analysis`` realizes the paper-facing planning stages from
+    vMCU §4 and §5.2; ``emit_compact_graph`` realizes the compiler/kernel side
+    of §3 and §6. The first and second analyses intentionally repeat the plan
+    so the graph and physical placement are reproducible before mutation.
 
     The first parse is never mutated. If candidates exist, a second parse must
     produce the exact same candidate identities before any edit is made. The

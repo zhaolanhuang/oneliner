@@ -1061,6 +1061,14 @@ def _collapse_commands_to_pool(
 def collapse_compact_io_pool(
     executes: list[CmdExecute], compact: dict[str, Any]
 ) -> None:
+    """Folds Stream input/output resources into one physical inout pool.
+
+    This preserves vMCU §4's shared circular input/output pool after IREE Stream
+    lowering. Detecting and removing a compiler-inserted full-pool copy is the
+    IREE/Rust ABI adaptation of that model; Stream resources are not part of
+    the paper. Every resulting range is checked against the schema-v4 pool size
+    before generated Rust is allowed to alias the resource.
+    """
     pool_size = compact.get("allocated_pool_bytes")
     if not isinstance(pool_size, int) or pool_size <= 0:
         raise StreamExtractionError("invalid compact_graph allocated_pool_bytes")

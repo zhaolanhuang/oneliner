@@ -1,4 +1,15 @@
-"""Paper-faithful K²+2 segment schedule for inverted bottlenecks."""
+"""Paper-derived K²+2 segment schedule for inverted bottlenecks.
+
+Paper correspondence: vMCU §5.2, PDF pp.6-7, Figure 6. The paper's 3×3
+schedule keeps nine B segments, one C segment, and one D segment, totaling
+11=3×3+1+1 workspace segments. Section 5.3 (PDF p.7) selects
+``min(Cin,Cout)`` as the Conv/IBN segment width.
+
+Engineering extension: the paper evaluates several kernel sizes but states the
+workspace derivation explicitly for 3×3. This implementation applies the same
+construction to arbitrary static ``Kh×Kw``, yielding ``Kh×Kw+2`` segments, and
+sizes D by ``Cout`` i32 lanes so unequal input/output channels are supported.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +21,11 @@ from ..memory import FixedSegmentMemoryPlan, SegmentSpec
 
 @dataclass(frozen=True)
 class InvertedBottleneckSegmentSchedule:
-    """K² expansion-patch segments, one depthwise segment, and one D segment."""
+    """K² expansion-patch segments, one depthwise segment, and one D segment.
+
+    Paper correspondence: §5.2, PDF p.7, paragraph beginning "For each step of
+    computation" through the explicit 11-segment workspace statement.
+    """
 
     module_input_channels: int
     expanded_channels: int

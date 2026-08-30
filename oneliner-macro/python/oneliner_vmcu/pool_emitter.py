@@ -1,4 +1,18 @@
-"""Emits byte-addressed tied-pool dispatches for a complete compact graph."""
+"""Emits byte-addressed tied-pool dispatches for a complete compact graph.
+
+Paper correspondence:
+* vMCU §3 (PDF p.4), Figure 2: coordinates memory management, kernel
+  execution, and compiler-generated code around one compact activation pool.
+* vMCU §4 (PDF pp.4–5): implements the circular pool, row-major logical
+  addresses, ``b_in``/``b_out`` offsets, and modulo physical addressing.
+* vMCU §5.1–§5.2 (PDF pp.5–7), Figures 4–6: lowers FC, convolution, and
+  inverted-bottleneck schedules into load/compute/store operations.
+
+Engineering adaptation: the paper's compiler emits C++ and vector intrinsics
+(§6 and §6.1, PDF p.7). This backend instead emits IREE Flow dispatches with
+one tied read/write pool operand. The present RAMLoad/RAMStore implementation is
+scalar; it does not claim to implement the paper's vectorized memcpy fast path.
+"""
 
 from __future__ import annotations
 
@@ -61,6 +75,11 @@ def _index(value: int) -> ir.Value:
 
 
 def _flatten(indices: tuple[ir.Value, ...], shape: tuple[int, ...]) -> ir.Value:
+    """Maps tensor coordinates to ``Laddr`` in row-major order.
+
+    This is the linearized-address mapping used by vMCU §4 (PDF p.4), before
+    the tensor-specific base offset and circular-pool modulo are applied.
+    """
     result = indices[0]
     for extent, index in zip(shape[1:], indices[1:], strict=True):
         result = arith.AddIOp(arith.MulIOp(result, _index(extent)).result, index).result
@@ -68,11 +87,25 @@ def _flatten(indices: tuple[ir.Value, ...], shape: tuple[int, ...]) -> ir.Value:
 
 
 def _physical(logical: ir.Value, base: int, capacity: int | None) -> ir.Value:
+    """Applies the paper's base offset and circular-pool address equation.
+
+    vMCU §4 (PDF p.4) defines ``Pool[addr]`` as
+    ``Pool[addr % (MemCap / Seg)]``. This implementation measures both address
+    and capacity in bytes, so the equivalent divisor is simply ``capacity``.
+    ``capacity=None`` is an engineering fast path for a proven non-wrapping
+    external/materialized tensor, not a separate paper schedule.
+    """
     offset = arith.AddIOp(logical, _index(base)).result
     return offset if capacity is None else arith.RemUIOp(offset, _index(capacity)).result
 
 
 def _pool_load(pool: ir.Value, logical: ir.Value, base: int, capacity: int | None) -> ir.Value:
+    """Emits scalar RAMLoad from the compact pool.
+
+    Corresponds to RAMLoad in vMCU §5.1, Figures 4–5 (PDF pp.5–6), including
+    the modulo boundary check described on PDF p.6. Unlike §6.1's vectorized
+    RAMLoad, this operation loads one i8 element.
+    """
     offset = _physical(logical, base, capacity)
     i8 = ir.IntegerType.get_signless(8)
     loaded = iree_tensor_ext.DispatchTensorLoadOp(
@@ -92,6 +125,12 @@ def _pool_load(pool: ir.Value, logical: ir.Value, base: int, capacity: int | Non
 def _pool_store(
     pool: ir.Value, value: ir.Value, logical: ir.Value, base: int, capacity: int | None
 ) -> None:
+    """Emits scalar RAMStore at the planned output base.
+
+    Corresponds to RAMStore in vMCU §5.1, Figures 4–5 (PDF pp.5–6). The
+    overwrite is safe only because compact_memory.py has already enforced §4
+    Equation (1), generalized to graph edges by §5.2 Equation (2).
+    """
     offset = _physical(logical, base, capacity)
     one = tensor.FromElementsOp(ir.RankedTensorType.get([1], value.type), [value]).result
     iree_tensor_ext.DispatchTensorStoreOp(
@@ -132,6 +171,13 @@ def _emit_dispatch(
     constants: tuple[ir.Value, ...],
     body_builder,
 ) -> ir.Value:
+    """Wraps one scheduled kernel in a tied read/write IREE dispatch.
+
+    The generated-kernel role corresponds to vMCU §3 Figure 2 and §6
+    (PDF pp.4, 7). A single tied IREE operand/result is an ABI adaptation that
+    serializes destructive pool updates; it is not an interface specified by
+    the paper.
+    """
     pool_type = ir.RankedTensorType(pool.type)
     with ir.InsertionPoint(anchor):
         workload = _index(1)
@@ -162,6 +208,12 @@ def _emit_dispatch(
 
 
 def _loops(extents: tuple[int, ...], body, prefix: tuple[ir.Value, ...] = ()) -> None:
+    """Builds the loop nests that realize the scheduled activation traversal.
+
+    This is the structural counterpart of the two-level tiling loops in vMCU
+    §5.1, Figures 4–5 (PDF pp.5–6). Hardware-vector inner tiles from §6.1 are
+    not represented by this generic scalar helper.
+    """
     if not extents:
         body(prefix)
         return
@@ -191,6 +243,13 @@ def _emit_conv(
     input_capacity: int | None,
     output_capacity: int | None,
 ) -> None:
+    """Lowers a quantized convolution to compact-pool accesses.
+
+    Follows vMCU §5.1 Figure 5 (PDF p.6): read an input tile/segment, reduce
+    with Flash-resident weights, quantize, and store directly at ``b_out``.
+    Returning the input zero-point for out-of-bounds padding is this compiler's
+    non-materializing implementation of the paper's boundary-check step.
+    """
     weight, bias_values, multiplier, shift = loaded
     i8 = ir.IntegerType.get_signless(8)
     i32 = ir.IntegerType.get_signless(32)
@@ -260,6 +319,12 @@ def _emit_depthwise(
     input_capacity: int | None,
     output_capacity: int | None,
 ) -> None:
+    """Lowers standalone depthwise convolution to compact-pool accesses.
+
+    The load/compute/store discipline is from vMCU §5.1 Figure 5 (PDF p.6).
+    Standalone arbitrary-K depthwise support is an engineering extension; the
+    paper discusses depthwise primarily inside the IBN schedule in §5.2.
+    """
     weight, bias_values, multiplier, shift = loaded
     i8 = ir.IntegerType.get_signless(8)
     i32 = ir.IntegerType.get_signless(32)
@@ -333,6 +398,12 @@ def _emit_fc(
     input_capacity: int | None,
     output_capacity: int | None,
 ) -> None:
+    """Lowers fully connected/GEMM traversal into the circular pool.
+
+    Corresponds to vMCU §2.4 Figure 1(c), §4 Figure 3, and §5.1 Figure 4
+    (PDF pp.3–5): consume one input row segment, accumulate an output segment,
+    and write it where the planner proves the input has become dead.
+    """
     weight, bias_values, multiplier, shift = loaded
     i32 = ir.IntegerType.get_signless(32)
     input_zp = constant(i32, candidate.input_zero_point)
@@ -375,6 +446,13 @@ def _emit_ibn(
     input_capacity: int | None,
     output_capacity: int | None,
 ) -> None:
+    """Fuses expansion, depthwise, projection, and residual for one IBN.
+
+    vMCU §5.2 Figure 6 (PDF pp.6–7) names the local states B, C, D, and E and
+    derives the 3×3 workspace as ``9 + 1 + 1 = 11`` segments. Here that schedule
+    is generalized to ``Kh*Kw + 2`` segments; arbitrary kernel sizes and the
+    exact IREE tensor representation are engineering extensions.
+    """
     (
         expansion_weight,
         expansion_bias,
@@ -406,6 +484,8 @@ def _emit_ibn(
         with ir.InsertionPoint(chunk_loop.body):
             chunk, d_state = chunk_loop.body.arguments
             expansion_padding = constant(i8, expansion.output_quantization.zero_point_at())
+            # vMCU §5.2 Figure 6 (PDF p.7): B holds one expansion segment for
+            # every depthwise kernel point (nine segments for a 3×3 kernel).
             b_initial = emit_static_segment_buffer(
                 patch_segments, segment_lanes, i8, expansion_padding
             )
@@ -488,6 +568,7 @@ def _emit_ibn(
             depthwise_padding = constant(
                 i8, depthwise.output_quantization.zero_point_at()
             )
+            # vMCU §5.2 Figure 6: C is the single post-depthwise i8 segment.
             c_type = ir.RankedTensorType.get([segment_lanes], i8)
             c_initial = tensor.SplatOp(c_type, depthwise_padding, []).result
 
@@ -549,6 +630,9 @@ def _emit_ibn(
                 i32, projection.weight_quantization.zero_point_at()
             )
 
+            # vMCU §5.2 Figure 6: D is the projection accumulator segment.
+            # This implementation uses Cout i32 lanes so Cin != Cout remains
+            # valid; that lane-shape generalization is repository-specific.
             def update_d(indices: tuple[ir.Value, ...], state: ir.Value) -> ir.Value:
                 output_channel, lane = indices
                 expanded_channel = arith.AddIOp(chunk, lane).result
@@ -701,7 +785,12 @@ def _emit_direct_boundary(
     output_base: int,
     output_capacity: int | None,
 ) -> ir.Value:
-    """Emits a validated residual/pooling expression directly over the pool."""
+    """Emits a validated residual/pooling expression directly over the pool.
+
+    Residual lifetime preservation follows vMCU §5.2 Equation (2) and the E
+    edge in Figure 6 (PDF pp.6–7). Generic identity/view and pooling evaluation
+    are engineering extensions used to keep graph boundaries allocation-free.
+    """
     if boundary.direct_kind is None:
         raise ValueError("materialized boundary cannot use direct lowering")
 
@@ -911,6 +1000,12 @@ def _replace_uses_except(value: ir.Value, replacement: ir.Value, excluded: set[i
 def _rewrite_abi(
     module: ir.Module, compact: CompactAnalysis
 ) -> tuple[ir.Operation, ir.Operation, ir.Operation, ir.Value]:
+    """Changes the public entry point to one in-place circular-pool tensor.
+
+    The single pool realizes vMCU §4's shared input/output memory model. IREE
+    reflection metadata and tied operands are repository-specific mechanisms
+    for expressing the destructive update safely through the compiler ABI.
+    """
     function, old_import, old_export = _find_abi(module)
     pool_type = ir.RankedTensorType.get(
         [compact.plan.allocated_pool_bytes], ir.IntegerType.get_signless(8)
@@ -940,7 +1035,13 @@ def emit_compact_graph(
     candidates: tuple[PatternMatch, ...],
     compact: CompactAnalysis,
 ) -> None:
-    """Atomically replaces all supported activations with one tied byte pool."""
+    """Atomically replaces all supported activations with one tied byte pool.
+
+    This is the integration point for vMCU §3 Figure 2 and §6 (PDF pp.4, 7):
+    the memory plan controls every generated kernel's physical accesses. The
+    atomic graph rewrite, tied SSA chain, and unsupported-boundary pack/unpack
+    path are IREE engineering extensions, not algorithms stated in the paper.
+    """
     candidate_by_id = {item.root.identifier: item for item in candidates}
     if set(candidate_by_id) != set(compact.candidate_order):
         raise ValueError("compact emitter candidate identities drifted after reparse")
