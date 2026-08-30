@@ -139,9 +139,6 @@ fn run_resource_report(
         .arg(object)
         .arg("--deployment")
         .arg(deployment);
-    if let Some(objdump) = std::env::var_os("OBJDUMP") {
-        command.arg("--objdump").arg(objdump);
-    }
     let status = command.status().map_err(|error| {
         syn::Error::new(
             Span::call_site(),

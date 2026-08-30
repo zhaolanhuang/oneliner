@@ -22,13 +22,12 @@ from oneliner_vmcu.memory import (  # noqa: E402
 )
 from oneliner_vmcu.resource_report import (  # noqa: E402
     parse_llvm_static_allocas,
-    parse_objdump_stack,
     parse_stream_arena,
 )
 
 
 class CircularMemoryAndBudgetTests(unittest.TestCase):
-    """Last-use safety, deterministic offsets, budgets, and object evidence."""
+    """Last-use safety, deterministic offsets, budgets, and lowering evidence."""
 
     def setUp(self):
         """Loads the fixed-schedule residual IBN source."""
@@ -62,7 +61,7 @@ class CircularMemoryAndBudgetTests(unittest.TestCase):
         accepted = rewrite_text(self.source, "strict", sram_budget=48)
         self.assertEqual(accepted.plan["resources"]["workspace_bytes"], 48)
 
-    def test_resource_parsers_measure_arena_alloca_and_machine_stack(self):
+    def test_resource_parsers_measure_arena_and_alloca_stack(self):
         """Synthetic lowering snippets cover all non-IREE parser branches."""
         stream = """
           %c96 = arith.constant 96 : index
@@ -80,20 +79,12 @@ class CircularMemoryAndBudgetTests(unittest.TestCase):
           }
         """
         self.assertEqual(parse_llvm_static_allocas(executable)[0], 32)
-        disassembly = """
-        0000000000000000 <kernel>:
-           0:\t55\tpush   %rbp
-           1:\t48 83 e4 c0\tand    $0xffffffffffffffc0,%rsp
-           5:\t48 81 ec 80 00 00 00\tsub    $0x80,%rsp
-        """
-        self.assertEqual(parse_objdump_stack(disassembly).maximum_bytes, 199)
-
     @unittest.skipUnless(
-        shutil.which("iree-compile") and shutil.which("objdump"),
-        "iree-compile and objdump are required",
+        shutil.which("iree-compile"),
+        "iree-compile is required",
     )
     def test_post_lowering_report_updates_total_and_enforces_budget(self):
-        """Final object, Stream arena, workspace, and stack form one SRAM total."""
+        """Executable stack, Stream arena, and workspace form one SRAM total."""
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
             pre = directory / "pre.mlir"
@@ -185,7 +176,6 @@ class CircularMemoryAndBudgetTests(unittest.TestCase):
             )
             self.assertEqual(resources["workspace_residency"], "stack-included")
             self.assertEqual(resources["status"], "within-budget")
-            self.assertTrue(resources["stack_estimate_within_tolerance"])
             # Re-run the same authoritative evidence with a deliberately small
             # cap to verify the nonzero process status consumed by Rust.
             report["resources"]["vmcu_sram_budget"] = 500

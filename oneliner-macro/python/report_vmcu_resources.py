@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Updates one vMCU plan with post-lowering object resource evidence."""
+"""Updates one vMCU plan with post-lowering resource evidence."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--stream", type=Path, required=True)
     parser.add_argument("--executable", type=Path, required=True)
     parser.add_argument("--object", type=Path, required=True)
-    parser.add_argument("--objdump", default="objdump")
     parser.add_argument(
         "--deployment", choices=("rewritten", "baseline-fallback"), default="rewritten"
     )
@@ -38,7 +37,6 @@ def run(arguments: list[str] | None = None) -> int:
             args.stream.read_text(encoding="utf-8"),
             args.executable.read_text(encoding="utf-8"),
             args.object,
-            objdump=args.objdump,
             deployment=args.deployment,
         )
         temporary = args.plan.with_suffix(args.plan.suffix + ".tmp")
