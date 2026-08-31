@@ -15,8 +15,6 @@ struct IreeTarget {
     cpu: Option<String>,
     /// Optional LLVM CPU feature string forwarded without reinterpretation.
     features: Option<String>,
-    /// Power-of-two compiler guard that permits post-object budget analysis.
-    stack_allocation_limit: Option<usize>,
 }
 
 pub(super) struct Compiler {
@@ -24,9 +22,9 @@ pub(super) struct Compiler {
 }
 
 impl Compiler {
-    pub(super) fn new(stack_allocation_limit: Option<usize>) -> syn::Result<Self> {
+    pub(super) fn new() -> syn::Result<Self> {
         Ok(Self {
-            target: resolve_target(stack_allocation_limit)?,
+            target: resolve_target()?,
         })
     }
 
@@ -77,7 +75,7 @@ impl Compiler {
 }
 
 /// Resolves Cargo/rustc target information once for consistent split commands.
-fn resolve_target(stack_allocation_limit: Option<usize>) -> syn::Result<IreeTarget> {
+fn resolve_target() -> syn::Result<IreeTarget> {
     // Cargo exposes cross-compilation targets through environment variables;
     // direct rustc invocations are covered by the process-argument/host fallbacks.
     let rust_target = if let Ok(target) =
@@ -101,7 +99,6 @@ fn resolve_target(stack_allocation_limit: Option<usize>) -> syn::Result<IreeTarg
         llvm_triple: target_info.llvm_triple,
         cpu: target_info.cpu.filter(|value| !value.is_empty()),
         features: target_info.features.filter(|value| !value.is_empty()),
-        stack_allocation_limit,
     })
 }
 
@@ -120,9 +117,6 @@ fn configure_target(command: &mut Command, input: &Path, target: &IreeTarget) {
     }
     if let Some(features) = &target.features {
         command.arg(format!("--iree-llvmcpu-target-cpu-features={features}"));
-    }
-    if let Some(limit) = target.stack_allocation_limit {
-        command.arg(format!("--iree-llvmcpu-stack-allocation-limit={limit}"));
     }
 }
 

@@ -36,11 +36,6 @@ def _parser() -> argparse.ArgumentParser:
         help="maximum explored states in bounded scheduling mode",
     )
     parser.add_argument(
-        "--sram-budget",
-        type=int,
-        help="maximum deployable SRAM bytes; fixed workspace is checked before rewrite",
-    )
-    parser.add_argument(
         "--iree-compile",
         help="iree-compile executable whose version must match the Python package",
     )
@@ -60,7 +55,6 @@ def run(arguments: list[str] | None = None) -> int:
         result = rewrite_text(
             source,
             args.iree_compile,
-            sram_budget=args.sram_budget,
             schedule_search=args.schedule_search,
             search_state_limit=args.search_state_limit,
         )

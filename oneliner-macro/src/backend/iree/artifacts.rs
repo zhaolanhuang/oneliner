@@ -48,7 +48,7 @@ pub(super) fn build(
 
     let (final_dump_stem, compact_io, vmcu_resources) = match vmcu_options {
         vmcu::Options::Disabled => {
-            Compiler::new(None)?.compile_full(
+            Compiler::new()?.compile_full(
                 &compile_input_path,
                 &vmfb_path,
                 &object_path,

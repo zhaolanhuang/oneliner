@@ -16,7 +16,7 @@ from typing import Any
 
 from iree.compiler import ir
 from .ir_utils import verify
-from .model import Analysis, PatternMatch, RejectedCandidate
+from .model import Analysis, PatternMatch
 from .normalize import NormalizedModule, normalize_module
 from .registry import PatternRegistry, create_default_registry
 from .versioning import CompilerVersionDiagnostics, diagnose_compiler_versions
@@ -67,33 +67,6 @@ def _analyze(
         return registry.analyze(normalized), normalized
     except ValueError as error:
         raise RewriteError(f"failed to build the preprocessing SSA graph: {error}") from error
-
-
-def _apply_sram_budget(analysis: Analysis, sram_budget: int | None) -> Analysis:
-    """Rejects fixed schedules whose known workspace alone exceeds the cap.
-
-    Arena and object stack are unavailable at preprocessing time and are added
-    by the post-lowering resource reporter. This early gate guarantees that an
-    impossible 11-segment workspace never reaches mutation.
-    """
-    if sram_budget is None:
-        return analysis
-    accepted = []
-    rejected = list(analysis.rejected)
-    for candidate in analysis.matches:
-        if candidate.workspace_bytes <= sram_budget:
-            accepted.append(candidate)
-            continue
-        rejected.append(
-            RejectedCandidate(
-                candidate.root,
-                candidate.kind,
-                "fixed schedule workspace exceeds vmcu_sram: "
-                f"required={candidate.workspace_bytes} budget={sram_budget}",
-                "preprocessing resource planner",
-            )
-        )
-    return Analysis(accepted, rejected)
 
 
 def _immutable_signature(value: Any) -> Any:
@@ -147,7 +120,6 @@ def _plan(
     versions: CompilerVersionDiagnostics,
     normalized: NormalizedModule,
     registry: PatternRegistry,
-    sram_budget: int | None,
     schedule_search: str,
     search_state_limit: int,
     compact: CompactAnalysis | None,
@@ -226,8 +198,6 @@ def _plan(
                 else None
             ),
             "total_sram_bytes": None,
-            "vmcu_sram_budget": sram_budget,
-            "status": "awaiting-post-lowering-analysis" if applied else "not-applied",
         },
     }
 
@@ -236,7 +206,6 @@ def rewrite_text(
     source_text: str,
     iree_compile: str | None = None,
     registry: PatternRegistry | None = None,
-    sram_budget: int | None = None,
     schedule_search: str = "bounded",
     search_state_limit: int = 1_000_000,
 ) -> RewriteResult:
@@ -251,8 +220,6 @@ def rewrite_text(
     produce the exact same candidate identities before any edit is made. The
     final serialized module is verified and reparsed before being returned.
     """
-    if sram_budget is not None and sram_budget <= 0:
-        raise RewriteError("sram_budget must be a positive byte count")
     if schedule_search not in ("bounded", "optimal", "greedy"):
         raise RewriteError(f"unsupported schedule search mode: {schedule_search}")
     if search_state_limit <= 0:
@@ -272,7 +239,6 @@ def rewrite_text(
     source_context, source_module = _parse(source_text)
     with source_context:
         source_analysis, source_normalized = _analyze(source_module, active_registry)
-        source_analysis = _apply_sram_budget(source_analysis, sram_budget)
         source_signatures = tuple(
             _candidate_signature(candidate) for candidate in source_analysis.matches
         )
@@ -298,7 +264,6 @@ def rewrite_text(
                 versions,
                 source_normalized,
                 active_registry,
-                sram_budget,
                 schedule_search,
                 search_state_limit,
                 source_compact,
@@ -318,7 +283,6 @@ def rewrite_text(
                 versions,
                 source_normalized,
                 active_registry,
-                sram_budget,
                 schedule_search,
                 search_state_limit,
                 None,
@@ -330,7 +294,6 @@ def rewrite_text(
     rewrite_context, rewrite_module = _parse(source_text)
     with rewrite_context, ir.Location.unknown():
         rewrite_analysis, _ = _analyze(rewrite_module, active_registry)
-        rewrite_analysis = _apply_sram_budget(rewrite_analysis, sram_budget)
         if rewrite_analysis.match_ids != source_analysis.match_ids:
             raise RewriteError("transactional re-analysis produced different candidates")
         try:
@@ -364,7 +327,6 @@ def rewrite_text(
                     del candidate
                     del current_analysis
                     current_analysis, _ = _analyze(rewrite_module, active_registry)
-                    current_analysis = _apply_sram_budget(current_analysis, sram_budget)
                 if current_analysis.matches:
                     raise RewriteError(
                         "iterative re-analysis found new candidates after all planned "
@@ -389,7 +351,6 @@ def rewrite_text(
             versions,
             source_normalized,
             active_registry,
-            sram_budget,
             schedule_search,
             search_state_limit,
             source_compact,

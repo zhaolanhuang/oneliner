@@ -14,7 +14,6 @@ REWRITER = PYTHON_DIR / "oneliner_vmcu" / "cli.py"
 REPORTER = PYTHON_DIR / "oneliner_vmcu" / "resource_cli.py"
 sys.path.insert(0, str(PYTHON_DIR))
 
-from oneliner_vmcu import rewrite_text  # noqa: E402
 from oneliner_vmcu.memory import (  # noqa: E402
     CircularMemoryPlan,
     SegmentLifetime,
@@ -26,12 +25,8 @@ from oneliner_iree.ram_usage_analysis import (  # noqa: E402
 )
 
 
-class CircularMemoryAndBudgetTests(unittest.TestCase):
-    """Last-use safety, deterministic offsets, budgets, and lowering evidence."""
-
-    def setUp(self):
-        """Loads the fixed-schedule residual IBN source."""
-        self.source = FIXTURE.read_text(encoding="utf-8")
+class CircularMemoryAndResourceTests(unittest.TestCase):
+    """Last-use safety, deterministic offsets, and lowering evidence."""
 
     def test_smallest_safe_output_offset_is_deterministic(self):
         """Linear scanning selects b_out=1 and never overwrites a live input."""
@@ -49,15 +44,6 @@ class CircularMemoryAndBudgetTests(unittest.TestCase):
             CircularMemoryPlan(2, 4, 0, 0, inputs, outputs)
         with self.assertRaisesRegex(ValueError, "no safe circular output offset"):
             plan_circular_memory(inputs, outputs, 2, 4)
-
-    def test_workspace_budget_falls_back_below_fixed_schedule_size(self):
-        """A 47-byte cap cannot silently select the fixed 48-byte workspace."""
-        result = rewrite_text(self.source, sram_budget=47)
-        self.assertEqual(result.text, self.source)
-        self.assertFalse(result.plan["applied"])
-        self.assertIn("required=48 budget=47", result.plan["rejected"][0]["reason"])
-        accepted = rewrite_text(self.source, sram_budget=48)
-        self.assertEqual(accepted.plan["resources"]["workspace_bytes"], 48)
 
     def test_resource_parsers_measure_arena_and_alloca_stack(self):
         """Synthetic lowering snippets cover all non-IREE parser branches."""
@@ -87,11 +73,12 @@ class CircularMemoryAndBudgetTests(unittest.TestCase):
         maximum, functions = parse_llvm_static_allocas(executable)
         self.assertEqual(functions, {"small": 32, "large": 5504})
         self.assertEqual(maximum, 5504)
+
     @unittest.skipUnless(
         shutil.which("iree-compile"),
         "iree-compile is required",
     )
-    def test_post_lowering_report_updates_total_and_enforces_budget(self):
+    def test_post_lowering_report_updates_total(self):
         """Executable stack, Stream arena, and workspace form one SRAM total."""
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
@@ -132,8 +119,6 @@ class CircularMemoryAndBudgetTests(unittest.TestCase):
                     str(rewritten),
                     "--plan-output",
                     str(plan),
-                    "--sram-budget",
-                    "4096",
                 ],
                 check=True,
                 capture_output=True,
@@ -161,8 +146,6 @@ class CircularMemoryAndBudgetTests(unittest.TestCase):
                     str(next(dumps.glob("*.7.stream.mlir"))),
                     "--executable",
                     str(next(dumps.glob("*.10.executable-targets.mlir"))),
-                    "--object",
-                    str(object_file),
                 ],
                 check=False,
                 capture_output=True,
@@ -181,33 +164,6 @@ class CircularMemoryAndBudgetTests(unittest.TestCase):
                 + resources["workspace_additional_sram_bytes"],
             )
             self.assertEqual(resources["workspace_residency"], "stack-included")
-            self.assertEqual(resources["status"], "within-budget")
-            # Re-run the same authoritative evidence with a deliberately small
-            # cap to verify the nonzero process status consumed by Rust.
-            report["resources"]["vmcu_sram_budget"] = 500
-            plan.write_text(json.dumps(report), encoding="utf-8")
-            exceeded = subprocess.run(
-                [
-                    sys.executable,
-                    str(REPORTER),
-                    "--plan",
-                    str(plan),
-                    "--stream",
-                    str(next(dumps.glob("*.7.stream.mlir"))),
-                    "--executable",
-                    str(next(dumps.glob("*.10.executable-targets.mlir"))),
-                    "--object",
-                    str(object_file),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(exceeded.returncode, 3, exceeded.stderr)
-            self.assertEqual(
-                json.loads(plan.read_text(encoding="utf-8"))["resources"]["status"],
-                "exceeds-budget",
-            )
 
     @unittest.skipUnless(shutil.which("iree-compile"), "iree-compile is required")
     def test_fixed_ibn_compiles_to_a_cortex_m4_object(self):
@@ -226,7 +182,6 @@ class CircularMemoryAndBudgetTests(unittest.TestCase):
                 "--iree-hal-local-target-device-backends=llvm-cpu",
                 "--iree-llvmcpu-target-triple=thumbv7em-none-eabi",
                 "--iree-llvmcpu-target-cpu=cortex-m4",
-                "--iree-llvmcpu-stack-allocation-limit=65536",
                 "--iree-llvmcpu-link-embedded=false",
                 "--iree-llvmcpu-link-static",
                 f"--iree-llvmcpu-static-library-output-path={object_file}",

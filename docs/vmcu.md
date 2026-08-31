@@ -123,9 +123,7 @@ output tensors live while `run` copies them into and out of the model-owned
 pool. Those interface tensors are shown separately in the Rust build report.
 
 Local B/C/D workspace is reported separately but is not added twice when it is
-already resident in the measured object stack. `vmcu_sram` is a deployment
-gate: an over-budget compact result falls back to the immutable preprocessing
-module and validates that deployment independently.
+already resident in the measured object stack.
 
 The main artifacts are `vmcu.preprocessing.mlir`, `vmcu.rewritten.mlir`,
 `vmcu.plan.json`, generated Flow Rust/JSON metadata, and the final object-level

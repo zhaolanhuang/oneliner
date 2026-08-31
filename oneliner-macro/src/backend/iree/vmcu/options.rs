@@ -11,7 +11,6 @@ pub(crate) enum Options {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EnabledOptions {
     pub(crate) search: Search,
-    pub(crate) sram_budget: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +40,6 @@ enum ParsedSearch {
 impl Options {
     pub(crate) fn parse(args: Vec<NestedMeta>) -> syn::Result<Self> {
         let mut enabled = None;
-        let mut sram_budget = None;
         let mut schedule = None;
         let mut search_states = None;
 
@@ -52,12 +50,6 @@ impl Options {
                         return Err(syn::Error::new(meta.span(), "duplicate vmcu option"));
                     }
                     enabled = Some(parse_enabled(meta.lit)?);
-                }
-                NestedMeta::Meta(Meta::NameValue(meta)) if meta.path.is_ident("vmcu_sram") => {
-                    if sram_budget.is_some() {
-                        return Err(syn::Error::new(meta.span(), "duplicate vmcu_sram option"));
-                    }
-                    sram_budget = Some(parse_positive_usize(meta.lit, "vmcu_sram")?);
                 }
                 NestedMeta::Meta(Meta::NameValue(meta)) if meta.path.is_ident("vmcu_schedule") => {
                     if schedule.is_some() {
@@ -82,19 +74,13 @@ impl Options {
                 other => {
                     return Err(syn::Error::new(
                         other.span(),
-                        "unknown #[model] option; expected backend, arena, format, vmcu, vmcu_sram, vmcu_schedule, or vmcu_search_states",
+                        "unknown #[model] option; expected backend, arena, format, vmcu, vmcu_schedule, or vmcu_search_states",
                     ));
                 }
             }
         }
 
         if !enabled.unwrap_or(false) {
-            if sram_budget.is_some() {
-                return Err(syn::Error::new(
-                    Span::call_site(),
-                    "vmcu_sram requires vmcu = \"auto\"",
-                ));
-            }
             if schedule.is_some() || search_states.is_some() {
                 return Err(syn::Error::new(
                     Span::call_site(),
@@ -118,10 +104,7 @@ impl Options {
             ParsedSearch::Optimal => Search::Optimal,
             ParsedSearch::Greedy => Search::Greedy,
         };
-        Ok(Self::Enabled(EnabledOptions {
-            search,
-            sram_budget,
-        }))
+        Ok(Self::Enabled(EnabledOptions { search }))
     }
 }
 
@@ -191,10 +174,9 @@ mod tests {
     }
 
     #[test]
-    fn validates_budget_and_search_options() {
+    fn validates_search_options() {
         let options = Options::parse(vec![
             syn::parse_quote!(vmcu = "auto"),
-            syn::parse_quote!(vmcu_sram = 65536),
             syn::parse_quote!(vmcu_schedule = "bounded"),
             syn::parse_quote!(vmcu_search_states = 123),
         ])
@@ -202,13 +184,10 @@ mod tests {
         assert!(matches!(
             options,
             Options::Enabled(EnabledOptions {
-                sram_budget: Some(65_536),
                 search: Search::Bounded { state_limit: 123 },
-                ..
             })
         ));
 
-        assert!(Options::parse(vec![syn::parse_quote!(vmcu_sram = 1024)]).is_err());
         assert!(Options::parse(vec![
             syn::parse_quote!(vmcu = "auto"),
             syn::parse_quote!(vmcu_schedule = "greedy"),
