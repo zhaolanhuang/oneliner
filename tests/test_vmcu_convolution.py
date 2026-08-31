@@ -146,6 +146,24 @@ class QuantizedConvolutionTests(unittest.TestCase):
         self.assertNotIn("linalg.depthwise_conv_2d_nhwc_hwcm_q", result.text)
         self.assertNotIn("linalg.fill", result.text)
 
+    def test_standalone_conv_match_accepts_5x5(self):
+        """Static positive Conv2D kernels are not restricted to 1x1 or 3x3."""
+        modified = self.source.replace(
+            "%c1 = arith.constant 1 : index",
+            "%c1 = arith.constant 1 : index\n    %c2 = arith.constant 2 : index",
+            1,
+        ).replace(
+            "low[%c0, %c1, %c1, %c0] high[%c0, %c1, %c1, %c0]",
+            "low[%c0, %c2, %c2, %c0] high[%c0, %c2, %c2, %c0]",
+            1,
+        )
+        modified = modified.replace("tensor<3x3x2x3xi8>", "tensor<5x5x2x3xi8>")
+        modified = modified.replace("tensor<1x7x7x2xi8>", "tensor<1x9x9x2xi8>")
+        result = rewrite_text(modified)
+        self.assertEqual(result.plan["totals"]["accepted"], 2)
+        self.assertEqual(result.plan["totals"]["rejected"], 0)
+        self.assertNotIn("linalg.conv_2d_nhwc_hwcf_q", result.text)
+
     def test_random_depthwise_kernels_are_bit_exact(self):
         """Standalone scalar reductions remain exact for 5x5 and 7x7 kernels."""
         generator = random.Random(0xD3E75)

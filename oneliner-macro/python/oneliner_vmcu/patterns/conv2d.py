@@ -30,8 +30,8 @@ def _match(root: ir.Operation, key) -> Conv2DMatch:
     output_shape = tensor_shape(root.results[0], "i32", 4)
     if weight_shape[2] != input_shape[3] or output_shape[3] != weight_shape[3]:
         raise ValueError("conv2d input/filter/output channel dimensions disagree")
-    if weight_shape[:2] not in ((1, 1), (3, 3)):
-        raise ValueError("conv2d fixed schedule supports 1x1 or 3x3 kernels")
+    if any(dimension <= 0 for dimension in weight_shape[:2]):
+        raise ValueError("conv2d kernel dimensions must be positive")
     validate_weight_source(root.operands[1], weight_shape)
     input_zp = (
         require_zero_point(root.operands[2], "conv2d input zero point")

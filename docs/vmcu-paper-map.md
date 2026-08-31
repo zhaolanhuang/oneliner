@@ -71,9 +71,11 @@ as written:
   ([`pool_emitter.py:168`](../oneliner-macro/python/oneliner_vmcu/pool_emitter.py#L168),
   [`stream_flow_to_rust.py:1061`](../oneliner-macro/python/oneliner_iree/stream_flow_to_rust.py#L1061),
   [`interface.rs:248`](../oneliner-runtime/src/interface.rs#L248)).
-- Arbitrary-K standalone depthwise, generic direct boundaries, `K²+2` IBN,
+- Arbitrary static standalone Conv2D/depthwise, generic direct boundaries, `K²+2` IBN,
   and a `Cout`-lane D accumulator generalize the paper's shown 3×3 IBN
-  ([`pool_emitter.py:312`](../oneliner-macro/python/oneliner_vmcu/pool_emitter.py#L312),
+  ([`conv2d.py:33`](../oneliner-macro/python/oneliner_vmcu/patterns/conv2d.py#L33),
+  [`pool_emitter.py:236`](../oneliner-macro/python/oneliner_vmcu/pool_emitter.py#L236),
+  [`pool_emitter.py:312`](../oneliner-macro/python/oneliner_vmcu/pool_emitter.py#L312),
   [`pool_emitter.py:633`](../oneliner-macro/python/oneliner_vmcu/pool_emitter.py#L633)).
 - vMCU §6.1 describes vectorized `RAMLoad`/`Dot`/`Broadcast`. The active pool
   emitter currently performs scalar one-byte loads/stores
