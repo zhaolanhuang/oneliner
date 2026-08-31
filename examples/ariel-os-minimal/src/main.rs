@@ -11,17 +11,16 @@ use oneliner::runtime::{ModelInference, ModelSource};
 #[model(
     "../models/mcunet-10fps_vww.tflite",
     arena = "shared",
-    vmcu = "auto",
-    vmcu_schedule = "greedy",
-    // vmcu_search_states = 1_000_000
+    vmcu = "on",
+    vmcu_search_mode = "greedy",
 )]
 struct Model;
 const EXPECTED: [i8; 2] = [4, -5];
 
 // #[model(
 //     "../models/lenet5_quantized.tflite",
-//     vmcu = "auto",
-//     vmcu_schedule = "greedy"
+//     vmcu = "on",
+//     vmcu_search_mode = "greedy"
 // )]
 // struct Model;
 // const INPUT_LEN: usize = 28 * 28 * 1;

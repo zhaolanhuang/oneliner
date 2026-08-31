@@ -861,7 +861,7 @@ def build_compact_analysis(
     analysis: Analysis,
     *,
     search_mode: ScheduleSearchMode | str,
-    search_state_limit: int,
+    search_budget: int | None,
 ) -> CompactAnalysis:
     """Builds and solves one context-free compact model plan.
 
@@ -885,7 +885,7 @@ def build_compact_analysis(
         tensors,
         kernels,
         search_mode=search_mode,
-        search_state_limit=search_state_limit,
+        search_budget=search_budget,
     )
     return CompactAnalysis(
         plan,

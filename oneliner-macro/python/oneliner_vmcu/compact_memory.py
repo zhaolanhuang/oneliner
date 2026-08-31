@@ -10,8 +10,8 @@ Paper correspondence (vMCU, MLSys 2024):
 
 Engineering extension: the paper formulates offset selection as ILP and gives
 an informal graph generalization. This module instead performs deterministic
-greedy/bounded/exhaustive DAG search and independently replays physical range
-overlaps at activation-segment granularity.
+greedy or exhaustive/budgeted optimal DAG search and independently replays
+physical range overlaps at activation-segment granularity.
 """
 
 from __future__ import annotations
@@ -27,12 +27,11 @@ class ScheduleSearchMode(str, Enum):
     """Search policies exposed by the Python and Rust build interfaces.
 
     These modes are engineering alternatives to the ILP formulation suggested
-    in vMCU §4 (PDF p.5); the paper does not define bounded/optimal/greedy modes.
+    in vMCU §4 (PDF p.5); the paper does not define optimal/greedy modes.
     """
 
-    BOUNDED = "bounded"
-    OPTIMAL = "optimal"
     GREEDY = "greedy"
+    OPTIMAL = "optimal"
 
 
 @dataclass(frozen=True)
@@ -312,7 +311,7 @@ class CompactGraphPlan:
     search_mode: ScheduleSearchMode
     optimal: bool
     explored_states: int
-    state_limit: int | None
+    search_budget: int | None
     tensors: tuple[VirtualTensor, ...]
     kernels: tuple[KernelAccessSchedule, ...]
     placements: tuple[TensorPlacement, ...]
@@ -341,7 +340,7 @@ class CompactGraphPlan:
                 "mode": self.search_mode.value,
                 "optimal": self.optimal,
                 "explored_states": self.explored_states,
-                "state_limit": self.state_limit,
+                "budget": self.search_budget,
             },
             "maximum_workspace_bytes": self.maximum_workspace_bytes,
             "output_view_base": self.placement_for(
@@ -504,7 +503,7 @@ def _search_capacity(
     pool_bytes: int,
     *,
     counter: _SearchCounter,
-    state_limit: int | None,
+    search_budget: int | None,
     greedy: bool,
 ) -> tuple[tuple[TensorPlacement, ...], tuple[KernelPlacement, ...]] | None:
     tensor_by_name, _ = _validate_graph(tensors, kernels)
@@ -521,7 +520,7 @@ def _search_capacity(
         execution: list[KernelPlacement],
     ) -> bool:
         nonlocal solution
-        if state_limit is not None and counter.explored >= state_limit:
+        if search_budget is not None and counter.explored >= search_budget:
             counter.exhausted = True
             return False
         counter.explored += 1
@@ -542,7 +541,7 @@ def _search_capacity(
         current_layout = _live_layout(live)
         for kernel in ready:
             output = tensor_by_name[kernel.output]
-            if greedy or state_limit is not None:
+            if greedy:
                 base_candidates = sorted(
                     {
                         0,
@@ -574,7 +573,7 @@ def _search_capacity(
                     base for base in range(pool_bytes) if base not in preferred
                 ]
             for base in base_candidates:
-                if state_limit is not None and counter.explored >= state_limit:
+                if search_budget is not None and counter.explored >= search_budget:
                     counter.exhausted = True
                     return False
                 counter.explored += 1
@@ -679,8 +678,8 @@ def plan_compact_graph(
     tensors: Iterable[VirtualTensor],
     kernels: Iterable[KernelAccessSchedule],
     *,
-    search_mode: ScheduleSearchMode | str = ScheduleSearchMode.BOUNDED,
-    search_state_limit: int = 1_000_000,
+    search_mode: ScheduleSearchMode | str = ScheduleSearchMode.GREEDY,
+    search_budget: int | None = None,
     alignment: int = 64,
 ) -> CompactGraphPlan:
     """Finds the smallest verified pool reached by the selected search mode.
@@ -688,9 +687,10 @@ def plan_compact_graph(
     Paper correspondence: §4, PDF p.5, minimizes ``bIn-bOut`` under Equation
     (1), and derives ``max(MN,MK)+min(N,K)-1`` for GEMM/Figure 3.
 
-    Engineering extension: ``greedy``, ``bounded``, and ``optimal`` are not
-    algorithms named by the paper. They replace its ILP suggestion with an
-    explicit DAG topology/base search suitable for this compiler pipeline.
+    Engineering extension: ``greedy`` and ``optimal`` are not algorithms named
+    by the paper. They replace its ILP suggestion with an explicit DAG
+    topology/base search suitable for this compiler pipeline. A budget turns
+    optimal search into deterministic best-effort search.
     """
     tensor_items = tuple(tensors)
     kernel_items = tuple(kernels)
@@ -698,85 +698,19 @@ def plan_compact_graph(
     try:
         mode = ScheduleSearchMode(search_mode)
     except ValueError as error:
-        raise ValueError(f"unsupported schedule search mode: {search_mode}") from error
-    if search_state_limit <= 0:
-        raise ValueError("schedule search state limit must be positive")
+        raise ValueError(f"unsupported search mode: {search_mode}") from error
+    if search_budget is not None and search_budget <= 0:
+        raise ValueError("search budget must be positive")
+    if search_budget is not None and mode != ScheduleSearchMode.OPTIMAL:
+        raise ValueError("search budget is valid only in optimal mode")
     align_up(0, alignment)
     lower = max(item.size_bytes for item in tensor_items)
     upper = sum(item.size_bytes for item in tensor_items)
-    counter = _SearchCounter()
-    result = None
-    capacity = lower
-    state_limit = search_state_limit if mode == ScheduleSearchMode.BOUNDED else None
-    if mode in (ScheduleSearchMode.GREEDY, ScheduleSearchMode.BOUNDED):
-        # Greedy feasibility is monotone for the non-wrapping boundary bases
-        # tried above. Binary search avoids a byte-by-byte capacity sweep on
-        # real activation tensors while retaining deterministic placement.
-        low_capacity = lower
-        high_capacity = upper
-        best = None
-        # Bounded mode starts from the deterministic greedy best-known plan.
-        # It then permits full topology/base branching at each binary probe
-        # until the explicit state budget is consumed.
-        if mode == ScheduleSearchMode.BOUNDED:
-            greedy_counter = _SearchCounter()
-            greedy_low = lower
-            greedy_high = upper
-            while greedy_low <= greedy_high:
-                candidate_capacity = (greedy_low + greedy_high) // 2
-                candidate_result = _search_capacity(
-                    tensor_items,
-                    kernel_items,
-                    candidate_capacity,
-                    counter=greedy_counter,
-                    state_limit=None,
-                    greedy=True,
-                )
-                if candidate_result is None:
-                    greedy_low = candidate_capacity + 1
-                else:
-                    best = (candidate_capacity, candidate_result)
-                    greedy_high = candidate_capacity - 1
-            if best is None:
-                raise ValueError("no safe greedy seed for bounded compact scheduling")
-            high_capacity = best[0] - 1
-        while low_capacity <= high_capacity:
-            candidate_capacity = (low_capacity + high_capacity) // 2
-            candidate_result = _search_capacity(
-                tensor_items,
-                kernel_items,
-                candidate_capacity,
-                counter=counter,
-                state_limit=state_limit,
-                greedy=mode == ScheduleSearchMode.GREEDY,
-            )
-            if counter.exhausted:
-                break
-            if candidate_result is None:
-                low_capacity = candidate_capacity + 1
-            else:
-                best = (candidate_capacity, candidate_result)
-                high_capacity = candidate_capacity - 1
-        if best is not None:
-            capacity, result = best
-    else:
-        for capacity in range(lower, upper + 1):
-            result = _search_capacity(
-                tensor_items,
-                kernel_items,
-                capacity,
-                counter=counter,
-                state_limit=state_limit,
-                greedy=False,
-            )
-            if result is not None:
-                break
-            if counter.exhausted:
-                break
-    if result is None and mode == ScheduleSearchMode.BOUNDED:
-        # A deterministic greedy seed guarantees a safe best-known fallback.
-        counter.exhausted = True
-        greedy_counter = _SearchCounter()
+
+    def greedy_plan(greedy_counter: _SearchCounter) -> tuple[
+        int,
+        tuple[tuple[TensorPlacement, ...], tuple[KernelPlacement, ...]],
+    ]:
         low_capacity = lower
         high_capacity = upper
         best = None
@@ -787,7 +721,7 @@ def plan_compact_graph(
                 kernel_items,
                 candidate_capacity,
                 counter=greedy_counter,
-                state_limit=None,
+                search_budget=None,
                 greedy=True,
             )
             if candidate_result is None:
@@ -795,8 +729,54 @@ def plan_compact_graph(
             else:
                 best = (candidate_capacity, candidate_result)
                 high_capacity = candidate_capacity - 1
-        if best is not None:
-            capacity, result = best
+        if best is None:
+            raise ValueError("no safe compact activation-pool schedule was found")
+        return best
+
+    counter = _SearchCounter()
+    result = None
+    capacity = lower
+    if mode == ScheduleSearchMode.GREEDY:
+        # Greedy feasibility is monotone for the non-wrapping boundary bases
+        # tried above. Binary search avoids a byte-by-byte capacity sweep on
+        # real activation tensors while retaining deterministic placement.
+        capacity, result = greedy_plan(counter)
+    elif search_budget is None:
+        for capacity in range(lower, upper + 1):
+            result = _search_capacity(
+                tensor_items,
+                kernel_items,
+                capacity,
+                counter=counter,
+                search_budget=None,
+                greedy=False,
+            )
+            if result is not None:
+                break
+    else:
+        # Budgeted optimal mode starts from a verified greedy plan, then uses
+        # the requested state budget to search all topology/base choices for a
+        # smaller pool. Exhausting the budget keeps the best safe plan found.
+        capacity, result = greedy_plan(_SearchCounter())
+        low_capacity = lower
+        high_capacity = capacity - 1
+        while low_capacity <= high_capacity:
+            candidate_capacity = (low_capacity + high_capacity) // 2
+            candidate_result = _search_capacity(
+                tensor_items,
+                kernel_items,
+                candidate_capacity,
+                counter=counter,
+                search_budget=search_budget,
+                greedy=False,
+            )
+            if counter.exhausted:
+                break
+            if candidate_result is None:
+                low_capacity = candidate_capacity + 1
+            else:
+                capacity, result = candidate_capacity, candidate_result
+                high_capacity = candidate_capacity - 1
     if result is None:
         raise ValueError("no safe compact activation-pool schedule was found")
     placements, execution = result
@@ -805,9 +785,9 @@ def plan_compact_graph(
         allocated_pool_bytes=align_up(capacity, alignment),
         alignment=alignment,
         search_mode=mode,
-        optimal=mode == ScheduleSearchMode.OPTIMAL,
+        optimal=mode == ScheduleSearchMode.OPTIMAL and search_budget is None,
         explored_states=counter.explored,
-        state_limit=search_state_limit if mode == ScheduleSearchMode.BOUNDED else None,
+        search_budget=search_budget,
         tensors=tensor_items,
         kernels=kernel_items,
         placements=placements,

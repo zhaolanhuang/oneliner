@@ -24,16 +24,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("-o", "--output", type=Path, required=True)
     parser.add_argument("--plan-output", type=Path, required=True)
     parser.add_argument(
-        "--schedule-search",
-        choices=("bounded", "optimal", "greedy"),
-        default="bounded",
+        "--search-mode",
+        choices=("greedy", "optimal"),
+        default="greedy",
         help="compact activation-pool topology/base search policy",
     )
     parser.add_argument(
-        "--search-state-limit",
+        "--search-budget",
         type=int,
-        default=1_000_000,
-        help="maximum explored states in bounded scheduling mode",
+        help="maximum explored states in optimal mode; omit for exhaustive search",
     )
     parser.add_argument(
         "--iree-compile",
@@ -55,8 +54,8 @@ def run(arguments: list[str] | None = None) -> int:
         result = rewrite_text(
             source,
             args.iree_compile,
-            schedule_search=args.schedule_search,
-            search_state_limit=args.search_state_limit,
+            search_mode=args.search_mode,
+            search_budget=args.search_budget,
         )
         args.output.write_text(result.text, encoding="utf-8")
         args.plan_output.write_text(

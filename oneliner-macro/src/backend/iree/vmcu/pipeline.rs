@@ -4,7 +4,7 @@ use std::process::Command;
 
 use proc_macro2::Span;
 
-use super::options::{EnabledOptions, Search};
+use super::options::EnabledOptions;
 use super::plan::{load_compact_io, load_resource_usage, CompactIo, ResourceUsage};
 use crate::backend::iree::toolchain::{python_executable, Compiler};
 use crate::utils::{run_command, rust_ident};
@@ -61,14 +61,12 @@ fn run_rewriter(
         .arg(rewritten)
         .arg("--plan-output")
         .arg(plan)
-        .arg("--schedule-search")
+        .arg("--search-mode")
         .arg(options.search.as_str())
         .arg("--iree-compile")
         .arg("iree-compile");
-    if let Search::Bounded { state_limit } = options.search {
-        command
-            .arg("--search-state-limit")
-            .arg(state_limit.to_string());
+    if let Some(budget) = options.search.budget() {
+        command.arg("--search-budget").arg(budget.to_string());
     }
     run_command(&mut command, "Python vMCU graph rewriter")
 }

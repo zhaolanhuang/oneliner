@@ -123,26 +123,26 @@ class CompactMemoryTests(unittest.TestCase):
         footprints = {}
         for mode in ScheduleSearchMode:
             first = plan_compact_graph(
-                tensors, kernels, search_mode=mode, search_state_limit=64, alignment=1
+                tensors, kernels, search_mode=mode, alignment=1
             )
             second = plan_compact_graph(
-                tensors, kernels, search_mode=mode, search_state_limit=64, alignment=1
+                tensors, kernels, search_mode=mode, alignment=1
             )
             self.assertEqual(first.to_dict(), second.to_dict())
             replay_compact_graph_plan(first)
             footprints[mode] = first.logical_pool_bytes
         self.assertLessEqual(footprints[ScheduleSearchMode.OPTIMAL], footprints[ScheduleSearchMode.GREEDY])
 
-        bounded = plan_compact_graph(
+        budgeted = plan_compact_graph(
             tensors,
             kernels,
-            search_mode=ScheduleSearchMode.BOUNDED,
-            search_state_limit=1,
+            search_mode=ScheduleSearchMode.OPTIMAL,
+            search_budget=1,
             alignment=1,
         )
-        self.assertEqual(bounded.explored_states, 1)
-        self.assertFalse(bounded.optimal)
-        replay_compact_graph_plan(bounded)
+        self.assertEqual(budgeted.explored_states, 1)
+        self.assertFalse(budgeted.optimal)
+        replay_compact_graph_plan(budgeted)
 
     def test_ibn_workspace_is_kernel_squared_plus_two(self):
         """Checks vMCU §5.2 Figure 6's 11 segments and the K²+2 extension."""

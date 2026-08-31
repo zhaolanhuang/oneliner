@@ -120,8 +120,8 @@ def _plan(
     versions: CompilerVersionDiagnostics,
     normalized: NormalizedModule,
     registry: PatternRegistry,
-    schedule_search: str,
-    search_state_limit: int,
+    search_mode: str,
+    search_budget: int | None,
     compact: CompactAnalysis | None,
 ) -> dict[str, Any]:
     """Builds the stable JSON plan without serializing live MLIR objects.
@@ -137,10 +137,8 @@ def _plan(
     compact_graph = compact.plan.to_dict() if compact is not None else {
         "status": "not-planned",
         "search": {
-            "mode": schedule_search,
-            "state_limit": search_state_limit
-            if schedule_search == "bounded"
-            else None,
+            "mode": search_mode,
+            "budget": search_budget,
             "explored_states": 0,
             "optimal": False,
         },
@@ -206,8 +204,8 @@ def rewrite_text(
     source_text: str,
     iree_compile: str | None = None,
     registry: PatternRegistry | None = None,
-    schedule_search: str = "bounded",
-    search_state_limit: int = 1_000_000,
+    search_mode: str = "greedy",
+    search_budget: int | None = None,
 ) -> RewriteResult:
     """Analyzes and transactionally rewrites preprocessing-phase MLIR.
 
@@ -220,10 +218,12 @@ def rewrite_text(
     produce the exact same candidate identities before any edit is made. The
     final serialized module is verified and reparsed before being returned.
     """
-    if schedule_search not in ("bounded", "optimal", "greedy"):
-        raise RewriteError(f"unsupported schedule search mode: {schedule_search}")
-    if search_state_limit <= 0:
-        raise RewriteError("search_state_limit must be positive")
+    if search_mode not in ("greedy", "optimal"):
+        raise RewriteError(f"unsupported search mode: {search_mode}")
+    if search_budget is not None and search_budget <= 0:
+        raise RewriteError("search_budget must be positive")
+    if search_budget is not None and search_mode != "optimal":
+        raise RewriteError("search_budget is valid only in optimal mode")
     versions = diagnose_compiler_versions(iree_compile)
     if versions.compatible is False:
         raise RewriteError(versions.diagnostic or "incompatible IREE versions")
@@ -247,8 +247,8 @@ def rewrite_text(
             try:
                 source_compact = build_compact_analysis(
                     source_analysis,
-                    search_mode=schedule_search,
-                    search_state_limit=search_state_limit,
+                    search_mode=search_mode,
+                    search_budget=search_budget,
                 )
             except ValueError:
                 source_compact = None
@@ -264,8 +264,8 @@ def rewrite_text(
                 versions,
                 source_normalized,
                 active_registry,
-                schedule_search,
-                search_state_limit,
+                search_mode,
+                search_budget,
                 source_compact,
             ),
         )
@@ -283,8 +283,8 @@ def rewrite_text(
                 versions,
                 source_normalized,
                 active_registry,
-                schedule_search,
-                search_state_limit,
+                search_mode,
+                search_budget,
                 None,
             ),
         )
@@ -351,8 +351,8 @@ def rewrite_text(
             versions,
             source_normalized,
             active_registry,
-            schedule_search,
-            search_state_limit,
+            search_mode,
+            search_budget,
             source_compact,
         ),
     )

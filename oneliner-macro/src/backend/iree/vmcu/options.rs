@@ -15,33 +15,39 @@ pub(crate) struct EnabledOptions {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Search {
-    Bounded { state_limit: usize },
-    Optimal,
     Greedy,
+    Optimal { budget: Option<usize> },
 }
 
 impl Search {
     pub(super) const fn as_str(self) -> &'static str {
         match self {
-            Self::Bounded { .. } => "bounded",
-            Self::Optimal => "optimal",
             Self::Greedy => "greedy",
+            Self::Optimal { .. } => "optimal",
+        }
+    }
+
+    pub(super) const fn budget(self) -> Option<usize> {
+        match self {
+            Self::Greedy | Self::Optimal { budget: None } => None,
+            Self::Optimal {
+                budget: Some(budget),
+            } => Some(budget),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ParsedSearch {
-    Bounded,
-    Optimal,
     Greedy,
+    Optimal,
 }
 
 impl Options {
     pub(crate) fn parse(args: Vec<NestedMeta>) -> syn::Result<Self> {
         let mut enabled = None;
-        let mut schedule = None;
-        let mut search_states = None;
+        let mut search_mode = None;
+        let mut search_budget = None;
 
         for arg in args {
             match arg {
@@ -51,58 +57,59 @@ impl Options {
                     }
                     enabled = Some(parse_enabled(meta.lit)?);
                 }
-                NestedMeta::Meta(Meta::NameValue(meta)) if meta.path.is_ident("vmcu_schedule") => {
-                    if schedule.is_some() {
+                NestedMeta::Meta(Meta::NameValue(meta))
+                    if meta.path.is_ident("vmcu_search_mode") =>
+                {
+                    if search_mode.is_some() {
                         return Err(syn::Error::new(
                             meta.span(),
-                            "duplicate vmcu_schedule option",
+                            "duplicate vmcu_search_mode option",
                         ));
                     }
-                    schedule = Some(parse_schedule(meta.lit)?);
+                    search_mode = Some(parse_search_mode(meta.lit)?);
                 }
                 NestedMeta::Meta(Meta::NameValue(meta))
-                    if meta.path.is_ident("vmcu_search_states") =>
+                    if meta.path.is_ident("vmcu_search_budget") =>
                 {
-                    if search_states.is_some() {
+                    if search_budget.is_some() {
                         return Err(syn::Error::new(
                             meta.span(),
-                            "duplicate vmcu_search_states option",
+                            "duplicate vmcu_search_budget option",
                         ));
                     }
-                    search_states = Some(parse_positive_usize(meta.lit, "vmcu_search_states")?);
+                    search_budget = Some(parse_positive_usize(meta.lit, "vmcu_search_budget")?);
                 }
                 other => {
                     return Err(syn::Error::new(
                         other.span(),
-                        "unknown #[model] option; expected backend, arena, format, vmcu, vmcu_schedule, or vmcu_search_states",
+                        "unknown #[model] option; expected backend, arena, format, vmcu, vmcu_search_mode, or vmcu_search_budget",
                     ));
                 }
             }
         }
 
         if !enabled.unwrap_or(false) {
-            if schedule.is_some() || search_states.is_some() {
+            if search_mode.is_some() || search_budget.is_some() {
                 return Err(syn::Error::new(
                     Span::call_site(),
-                    "vmcu_schedule and vmcu_search_states require vmcu = \"auto\"",
+                    "vmcu_search_mode and vmcu_search_budget require vmcu = \"on\"",
                 ));
             }
             return Ok(Self::Disabled);
         }
 
-        let schedule = schedule.unwrap_or(ParsedSearch::Bounded);
-        if search_states.is_some() && schedule != ParsedSearch::Bounded {
+        let search_mode = search_mode.unwrap_or(ParsedSearch::Greedy);
+        if search_budget.is_some() && search_mode != ParsedSearch::Optimal {
             return Err(syn::Error::new(
                 Span::call_site(),
-                "vmcu_search_states is valid only with vmcu_schedule = \"bounded\"",
+                "vmcu_search_budget is valid only with vmcu_search_mode = \"optimal\"",
             ));
         }
-        let search = match schedule {
-            ParsedSearch::Bounded => Search::Bounded {
-                state_limit: search_states.unwrap_or(1_000_000),
-            },
-            ParsedSearch::Optimal => Search::Optimal,
+        let search = match search_mode {
             ParsedSearch::Greedy => Search::Greedy,
+            ParsedSearch::Optimal => Search::Optimal {
+                budget: search_budget,
+            },
         };
         Ok(Self::Enabled(EnabledOptions { search }))
     }
@@ -112,33 +119,32 @@ fn parse_enabled(lit: Lit) -> syn::Result<bool> {
     let Lit::Str(value) = lit else {
         return Err(syn::Error::new(
             lit.span(),
-            "vmcu must be a string literal, for example vmcu = \"auto\"",
+            "vmcu must be a string literal, for example vmcu = \"on\"",
         ));
     };
     match value.value().trim().to_ascii_lowercase().as_str() {
         "off" => Ok(false),
-        "auto" => Ok(true),
+        "on" => Ok(true),
         other => Err(syn::Error::new(
             value.span(),
-            format!("unknown vmcu mode '{other}', expected 'off' or 'auto'"),
+            format!("unknown vmcu mode '{other}', expected 'off' or 'on'"),
         )),
     }
 }
 
-fn parse_schedule(lit: Lit) -> syn::Result<ParsedSearch> {
+fn parse_search_mode(lit: Lit) -> syn::Result<ParsedSearch> {
     let Lit::Str(value) = lit else {
         return Err(syn::Error::new(
             lit.span(),
-            "vmcu_schedule must be \"bounded\", \"optimal\", or \"greedy\"",
+            "vmcu_search_mode must be \"greedy\" or \"optimal\"",
         ));
     };
     match value.value().trim().to_ascii_lowercase().as_str() {
-        "bounded" => Ok(ParsedSearch::Bounded),
-        "optimal" => Ok(ParsedSearch::Optimal),
         "greedy" => Ok(ParsedSearch::Greedy),
+        "optimal" => Ok(ParsedSearch::Optimal),
         other => Err(syn::Error::new(
             value.span(),
-            format!("unknown vmcu_schedule '{other}', expected 'bounded', 'optimal', or 'greedy'"),
+            format!("unknown vmcu_search_mode '{other}', expected 'greedy' or 'optimal'"),
         )),
     }
 }
@@ -167,31 +173,44 @@ mod tests {
     #[test]
     fn parses_activation_and_defaults_to_disabled() {
         assert_eq!(Options::parse(vec![]).unwrap(), Options::Disabled);
-        assert!(matches!(
-            Options::parse(vec![syn::parse_quote!(vmcu = "auto")]).unwrap(),
-            Options::Enabled(_)
-        ));
+        assert_eq!(
+            Options::parse(vec![syn::parse_quote!(vmcu = "on")]).unwrap(),
+            Options::Enabled(EnabledOptions {
+                search: Search::Greedy,
+            })
+        );
     }
 
     #[test]
     fn validates_search_options() {
         let options = Options::parse(vec![
-            syn::parse_quote!(vmcu = "auto"),
-            syn::parse_quote!(vmcu_schedule = "bounded"),
-            syn::parse_quote!(vmcu_search_states = 123),
+            syn::parse_quote!(vmcu = "on"),
+            syn::parse_quote!(vmcu_search_mode = "optimal"),
+            syn::parse_quote!(vmcu_search_budget = 123),
         ])
         .unwrap();
-        assert!(matches!(
+        assert_eq!(
             options,
             Options::Enabled(EnabledOptions {
-                search: Search::Bounded { state_limit: 123 },
+                search: Search::Optimal { budget: Some(123) },
             })
-        ));
+        );
+
+        assert_eq!(
+            Options::parse(vec![
+                syn::parse_quote!(vmcu = "on"),
+                syn::parse_quote!(vmcu_search_mode = "optimal"),
+            ])
+            .unwrap(),
+            Options::Enabled(EnabledOptions {
+                search: Search::Optimal { budget: None },
+            })
+        );
 
         assert!(Options::parse(vec![
-            syn::parse_quote!(vmcu = "auto"),
-            syn::parse_quote!(vmcu_schedule = "greedy"),
-            syn::parse_quote!(vmcu_search_states = 1),
+            syn::parse_quote!(vmcu = "on"),
+            syn::parse_quote!(vmcu_search_mode = "greedy"),
+            syn::parse_quote!(vmcu_search_budget = 1),
         ])
         .is_err());
     }
@@ -199,10 +218,11 @@ mod tests {
     #[test]
     fn rejects_duplicate_and_unknown_options() {
         assert!(Options::parse(vec![
-            syn::parse_quote!(vmcu = "auto"),
+            syn::parse_quote!(vmcu = "on"),
             syn::parse_quote!(vmcu = "off"),
         ])
         .is_err());
+        assert!(Options::parse(vec![syn::parse_quote!(vmcu = "auto")]).is_err());
         assert!(Options::parse(vec![syn::parse_quote!(vmcu = "fast")]).is_err());
         assert!(Options::parse(vec![syn::parse_quote!(unknown = true)]).is_err());
     }

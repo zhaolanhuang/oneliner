@@ -16,9 +16,8 @@ This pipeline runs between IREE's `preprocessing` and dispatch-creation phases:
 ```rust
 #[model(
     "models/model.tflite",
-    vmcu = "auto",
-    vmcu_schedule = "bounded",
-    vmcu_search_states = 1_000_000,
+    vmcu = "on",
+    vmcu_search_mode = "greedy",
 )]
 struct MyModel;
 ```
@@ -52,9 +51,13 @@ The available deterministic search policies are:
 
 | Policy | Behavior |
 | --- | --- |
-| `bounded` | Branch-and-bound up to the configured state limit; returns the best replay-verified plan found. |
-| `optimal` | Exhausts the search space and proceeds only with a proven optimum. |
 | `greedy` | Uses deterministic topological selection and placement without optimality search. |
+| `optimal` | Exhausts the search space when no budget is set; with a budget, returns the best replay-verified plan found within that many explored states. |
+
+`greedy` is the default when `vmcu_search_mode` is omitted. Exhaustive optimal
+search is enabled with `vmcu_search_mode = "optimal"`. Adding
+`vmcu_search_budget = N` makes optimal search best-effort and bounds it to `N`
+explored states; the plan then reports `optimal = false`.
 
 Planning is byte-addressed. The logical minimum is retained in the plan and the
 physical pool is rounded to 64 bytes. The final output is contiguous and does
