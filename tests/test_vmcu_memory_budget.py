@@ -20,7 +20,7 @@ from oneliner_vmcu.memory import (  # noqa: E402
     SegmentLifetime,
     plan_circular_memory,
 )
-from oneliner_vmcu.resource_report import (  # noqa: E402
+from oneliner_iree.ram_usage_analysis import (  # noqa: E402
     parse_llvm_static_allocas,
     parse_stream_arena,
 )

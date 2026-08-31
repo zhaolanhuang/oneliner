@@ -8,6 +8,7 @@ use syn::Ident;
 use super::discovery::parse_query_function;
 use super::metadata::load_metadata;
 use super::object_size::measure_object;
+use super::ram_usage_analysis::{analyze as analyze_ram_usage, LoweringRamUsage};
 use super::toolchain::{run_converter, Compiler};
 use super::vmcu;
 use super::{ArtifactPaths, IoLayout, IreeArtifacts, RamUsage};
@@ -75,13 +76,15 @@ pub(super) fn build(
     let footprint = measure_object(&object_path)?;
 
     let ir_path = ir_dump_dir.join(format!("{final_dump_stem}.10.executable-targets.mlir"));
+    let stream_path = ir_dump_dir.join(format!("{final_dump_stem}.7.stream.mlir"));
     let flow_rs = artifact_dir.join(format!("{model_stem}.flow.rs"));
     let metadata_json = artifact_dir.join(format!("{model_stem}.flow.json"));
     run_converter(&ir_path, &flow_rs, &metadata_json)?;
 
     let metadata = load_metadata(&metadata_json)?;
+    let lowering_resources = analyze_ram_usage(&stream_path, &ir_path)?;
     let io = vmcu::resolve_io(metadata.io, compact_io)?;
-    let ram = resolve_ram_usage(&io, metadata.ram_size, vmcu_resources)?;
+    let ram = resolve_ram_usage(&io, metadata.ram_size, lowering_resources, vmcu_resources)?;
     validate_tensor_size("input", io.input_size(), &model_io.input)?;
     validate_tensor_size("output", io.output_size(), &model_io.output)?;
 
@@ -110,44 +113,38 @@ pub(super) fn build(
 fn resolve_ram_usage(
     io: &IoLayout,
     flow_transient_size: usize,
+    lowering: LoweringRamUsage,
     vmcu_resources: Option<vmcu::ResourceUsage>,
 ) -> syn::Result<RamUsage> {
-    let Some(resources) = vmcu_resources else {
-        return Ok(RamUsage {
-            transient_size: flow_transient_size,
-            stack_size: 0,
-            total_size: flow_transient_size,
-        });
-    };
+    if lowering.transient_size != flow_transient_size {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "IREE lowering and generated Flow transient arena sizes differ",
+        ));
+    }
     let io_pool_size = match io {
         IoLayout::InPlace { storage_size, .. } => *storage_size,
         IoLayout::Separate { .. } => 0,
     };
-    if resources.io_pool_size != io_pool_size {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            "vMCU resource report and deployed I/O pool sizes differ",
-        ));
-    }
-    if resources.transient_size != flow_transient_size {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            "vMCU resource report and generated Flow transient arena sizes differ",
-        ));
-    }
     let total_size = io_pool_size
         .checked_add(flow_transient_size)
-        .and_then(|size| size.checked_add(resources.stack_size))
+        .and_then(|size| size.checked_add(lowering.stack_size))
         .ok_or_else(|| syn::Error::new(Span::call_site(), "RAM usage overflows usize"))?;
-    if resources.total_size != total_size {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            "vMCU resource report total does not match its deployed components",
-        ));
+    if let Some(resources) = vmcu_resources {
+        if resources.io_pool_size != io_pool_size
+            || resources.transient_size != lowering.transient_size
+            || resources.stack_size != lowering.stack_size
+            || resources.total_size != total_size
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "vMCU plan and common IREE resource analysis differ",
+            ));
+        }
     }
     Ok(RamUsage {
         transient_size: flow_transient_size,
-        stack_size: resources.stack_size,
+        stack_size: lowering.stack_size,
         total_size,
     })
 }

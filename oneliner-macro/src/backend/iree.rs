@@ -3,6 +3,7 @@ mod codegen;
 mod discovery;
 mod metadata;
 mod object_size;
+mod ram_usage_analysis;
 mod toolchain;
 mod vmcu;
 

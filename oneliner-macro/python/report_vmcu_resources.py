@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from oneliner_vmcu.resource_report import finalize_resource_plan  # noqa: E402
+from oneliner_vmcu.resource_plan import finalize_resource_plan  # noqa: E402
 
 
 def _parser() -> argparse.ArgumentParser:
