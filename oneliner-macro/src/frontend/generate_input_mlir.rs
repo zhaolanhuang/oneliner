@@ -21,7 +21,8 @@ pub(super) fn from_pytorch(input: &Path, output: &Path, module_name: &str) -> sy
         .arg(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("python")
-                .join("import_pytorch.py"),
+                .join("oneliner_iree")
+                .join("pytorch_import.py"),
         )
         .arg(input)
         .arg("--output")

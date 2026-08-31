@@ -20,7 +20,7 @@ REAL_PREPROCESSING = (
     / "model_iree_mcunet_10fps_vww"
     / "vmcu.preprocessing.mlir"
 )
-SCRIPT = PYTHON_DIR / "rewrite_vmcu.py"
+SCRIPT = PYTHON_DIR / "oneliner_vmcu" / "cli.py"
 sys.path.insert(0, str(PYTHON_DIR))
 
 from oneliner_vmcu import rewrite_text  # noqa: E402

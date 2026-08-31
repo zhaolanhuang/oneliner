@@ -15,7 +15,8 @@ pub(super) struct LoweringRamUsage {
 pub(super) fn analyze(stream: &Path, executable: &Path) -> syn::Result<LoweringRamUsage> {
     let reporter = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("python")
-        .join("analyze_iree_ram_usage.py");
+        .join("oneliner_iree")
+        .join("ram_usage_cli.py");
     let output = Command::new(python_executable())
         .arg(reporter)
         .arg("--stream")

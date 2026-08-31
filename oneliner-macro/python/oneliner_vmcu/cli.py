@@ -7,7 +7,12 @@ import json
 import sys
 from pathlib import Path
 
-from .rewrite import RewriteError, rewrite_text
+
+# Cargo executes this checked-in file directly, so make its package parent
+# importable without requiring oneliner_vmcu to be installed site-wide.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from oneliner_vmcu.rewrite import RewriteError, rewrite_text  # noqa: E402
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -82,3 +87,7 @@ def run(arguments: list[str] | None = None) -> int:
 def main() -> None:
     """CLI entry point that maps ``run``'s status to the process exit code."""
     raise SystemExit(run())
+
+
+if __name__ == "__main__":
+    main()

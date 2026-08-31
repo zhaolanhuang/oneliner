@@ -9,7 +9,8 @@ SCRIPT = (
     Path(__file__).parents[1]
     / "oneliner-macro"
     / "python"
-    / "import_pytorch.py"
+    / "oneliner_iree"
+    / "pytorch_import.py"
 )
 SPEC = importlib.util.spec_from_file_location("oneliner_pytorch_importer", SCRIPT)
 IMPORTER = importlib.util.module_from_spec(SPEC)

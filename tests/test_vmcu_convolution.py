@@ -13,7 +13,7 @@ PYTHON_DIR = ROOT / "oneliner-macro" / "python"
 FIXTURE = ROOT / "tests" / "fixtures" / "vmcu_conv_depthwise.mlir"
 CHAINED_FIXTURE = ROOT / "tests" / "fixtures" / "vmcu_chained_conv.mlir"
 SHARED_DEPTHWISE_FIXTURE = ROOT / "tests" / "fixtures" / "vmcu_shared_depthwise.mlir"
-SCRIPT = PYTHON_DIR / "rewrite_vmcu.py"
+SCRIPT = PYTHON_DIR / "oneliner_vmcu" / "cli.py"
 sys.path.insert(0, str(PYTHON_DIR))
 
 from oneliner_vmcu import rewrite_text  # noqa: E402

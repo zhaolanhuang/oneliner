@@ -15,7 +15,7 @@ from unittest import mock
 ROOT = Path(__file__).parents[1]
 # Resolve the checked-in package exactly as the Cargo entry-point script does.
 PYTHON_DIR = ROOT / "oneliner-macro" / "python"
-SCRIPT = PYTHON_DIR / "rewrite_vmcu.py"
+SCRIPT = PYTHON_DIR / "oneliner_vmcu" / "cli.py"
 FIXTURE = ROOT / "tests" / "fixtures" / "vmcu_fc.mlir"
 REAL_PREPROCESSING = (
     ROOT

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from oneliner_vmcu.resource_plan import finalize_resource_plan  # noqa: E402
 

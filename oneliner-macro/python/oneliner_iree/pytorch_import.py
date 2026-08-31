@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Imports a torch.export ExportedProgram into IREE-compatible MLIR."""
+"""Imports a torch.export ExportedProgram through IREE Turbine."""
 
 from __future__ import annotations
 

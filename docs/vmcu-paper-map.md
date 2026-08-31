@@ -49,7 +49,7 @@ after moving code.
 | §6, PDF p.7, compiler support | Transactional MLIR analysis, one source-pass plan, second-pass rebind/replay, and graph emission | [`rewrite.py:242`](../oneliner-macro/python/oneliner_vmcu/rewrite.py#L242), [`compact_analysis.py:860`](../oneliner-macro/python/oneliner_vmcu/compact_analysis.py#L860), [`compact_analysis.py:899`](../oneliner-macro/python/oneliner_vmcu/compact_analysis.py#L899) |
 | §3 Figure 2 and §6, PDF pp.4, 7 | One generated dispatch per scheduled kernel, chained through a tied read/write pool | [`pool_emitter.py:168`](../oneliner-macro/python/oneliner_vmcu/pool_emitter.py#L168), [`pool_emitter.py:1033`](../oneliner-macro/python/oneliner_vmcu/pool_emitter.py#L1033) |
 | §4, PDF pp.4–5, shared input/output pool | Rewrite the public MLIR ABI to one tied pool | [`pool_emitter.py:1000`](../oneliner-macro/python/oneliner_vmcu/pool_emitter.py#L1000) |
-| §4, PDF pp.4–5, shared input/output pool | Preserve the same physical resource through generic IREE Stream `inout` inference and a model-owned generated Rust buffer | [`iree_stream_flow_to_rust.py:410`](../oneliner-macro/python/iree_stream_flow_to_rust.py#L410), [`iree_stream_flow_to_rust.py:1213`](../oneliner-macro/python/iree_stream_flow_to_rust.py#L1213), [`vmcu/codegen.rs:8`](../oneliner-macro/src/backend/iree/vmcu/codegen.rs#L8), [`vmcu/codegen.rs:29`](../oneliner-macro/src/backend/iree/vmcu/codegen.rs#L29), [`vmcu/codegen.rs:58`](../oneliner-macro/src/backend/iree/vmcu/codegen.rs#L58) |
+| §4, PDF pp.4–5, shared input/output pool | Preserve the same physical resource through generic IREE Stream `inout` inference and a model-owned generated Rust buffer | [`stream_flow_to_rust.py:410`](../oneliner-macro/python/oneliner_iree/stream_flow_to_rust.py#L410), [`stream_flow_to_rust.py:1213`](../oneliner-macro/python/oneliner_iree/stream_flow_to_rust.py#L1213), [`vmcu/codegen.rs:8`](../oneliner-macro/src/backend/iree/vmcu/codegen.rs#L8), [`vmcu/codegen.rs:29`](../oneliner-macro/src/backend/iree/vmcu/codegen.rs#L29), [`vmcu/codegen.rs:58`](../oneliner-macro/src/backend/iree/vmcu/codegen.rs#L58) |
 | §4 Equation (1) and §5.2 Equation (2) | Independently replay every circular physical overlap at segment granularity before accepting a plan | [`compact_memory.py:632`](../oneliner-macro/python/oneliner_vmcu/compact_memory.py#L632) |
 
 ## Deliberate engineering extensions and current gaps
@@ -69,7 +69,7 @@ as written:
 - IREE tied dispatch resources, Stream copy folding, and Rust borrow-checked
   output views are backend/ABI adaptations, not paper interfaces
   ([`pool_emitter.py:168`](../oneliner-macro/python/oneliner_vmcu/pool_emitter.py#L168),
-  [`iree_stream_flow_to_rust.py:1061`](../oneliner-macro/python/iree_stream_flow_to_rust.py#L1061),
+  [`stream_flow_to_rust.py:1061`](../oneliner-macro/python/oneliner_iree/stream_flow_to_rust.py#L1061),
   [`interface.rs:248`](../oneliner-runtime/src/interface.rs#L248)).
 - Arbitrary-K standalone depthwise, generic direct boundaries, `K²+2` IBN,
   and a `Cout`-lane D accumulator generalize the paper's shown 3×3 IBN

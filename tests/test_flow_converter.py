@@ -10,7 +10,8 @@ SCRIPT = (
     Path(__file__).parents[1]
     / "oneliner-macro"
     / "python"
-    / "iree_stream_flow_to_rust.py"
+    / "oneliner_iree"
+    / "stream_flow_to_rust.py"
 )
 FIXTURE = Path(__file__).parent / "fixtures" / "abs2.10.executable-targets.mlir"
 REAL_VMCU_DUMP = (

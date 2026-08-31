@@ -10,8 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 PYTHON_DIR = ROOT / "oneliner-macro" / "python"
 FIXTURE = ROOT / "tests" / "fixtures" / "vmcu_ibn_11seg.mlir"
-REWRITER = PYTHON_DIR / "rewrite_vmcu.py"
-REPORTER = PYTHON_DIR / "report_vmcu_resources.py"
+REWRITER = PYTHON_DIR / "oneliner_vmcu" / "cli.py"
+REPORTER = PYTHON_DIR / "oneliner_vmcu" / "resource_cli.py"
 sys.path.insert(0, str(PYTHON_DIR))
 
 from oneliner_vmcu import RewriteError, rewrite_text  # noqa: E402

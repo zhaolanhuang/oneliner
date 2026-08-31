@@ -96,7 +96,8 @@ fn run_rewriter(
 ) -> syn::Result<()> {
     let rewriter = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("python")
-        .join("rewrite_vmcu.py");
+        .join("oneliner_vmcu")
+        .join("cli.py");
     let mut command = Command::new(python_executable());
     command
         .arg(rewriter)
@@ -131,7 +132,8 @@ fn run_resource_report(
 ) -> syn::Result<ResourceReport> {
     let reporter = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("python")
-        .join("report_vmcu_resources.py");
+        .join("oneliner_vmcu")
+        .join("resource_cli.py");
     let stream = ir_dump_dir.join(format!("{dump_stem}.7.stream.mlir"));
     let executable = ir_dump_dir.join(format!("{dump_stem}.10.executable-targets.mlir"));
     let mut command = Command::new(python_executable());
