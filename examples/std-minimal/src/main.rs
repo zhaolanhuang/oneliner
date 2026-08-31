@@ -1,28 +1,26 @@
 use log::{error, info};
 
 use oneliner::model;
-use oneliner_profiler::Profiler;
 use oneliner::runtime::{ModelInference, ModelSource};
+use oneliner_profiler::Profiler;
 
-#[model(
-    "../models/mcunet-10fps_vww.tflite",
-)]
+#[model("../models/mcunet-10fps_vww.tflite")]
 struct Model;
 const INPUT_LEN: usize = 64 * 64 * 3;
 const EXPECTED: [i8; 2] = [4, -5];
-
-
 
 fn main() {
     let artifacts = <Model as ModelSource>::ARTIFACTS;
     env_logger::init();
     info!(
-        "Flash usage: params={} code={} rodata={} total={} | RAM usage: arena={} input={} output={}",
+        "Flash usage: params={} code={} rodata={} total={} | RAM usage: arena={} stack={} total={} input={} output={}",
         artifacts.params_size,
         artifacts.code_size,
         artifacts.rodata_size,
         artifacts.total_flash_size,
         artifacts.ram_size,
+        artifacts.stack_size,
+        artifacts.total_ram_size,
         artifacts.input_size,
         artifacts.output_size
     );

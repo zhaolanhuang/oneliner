@@ -235,4 +235,11 @@ pub struct ModelArtifacts {
     pub total_flash_size: usize,
     /// Transient workspace bytes held in RAM during inference.
     pub ram_size: usize,
+    /// Static LLVM alloca bytes in the largest compiled dispatch function.
+    /// This excludes final machine-code spills and register-save overhead.
+    pub stack_size: usize,
+    /// Total model-managed SRAM: compact I/O pool, transient resources, and
+    /// the available static stack estimate. External tensor buffers are not
+    /// included.
+    pub total_ram_size: usize,
 }

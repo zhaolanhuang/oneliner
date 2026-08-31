@@ -43,7 +43,9 @@ pub(super) fn expand(
     let code_size = artifacts.code_size;
     let rodata_size = artifacts.rodata_size;
     let total_flash_size = params_size + code_size + rodata_size;
-    let ram_size = artifacts.ram_size;
+    let ram_size = artifacts.ram.transient_size;
+    let stack_size = artifacts.ram.stack_size;
+    let total_ram_size = artifacts.ram.total_size;
     let execute_fns = &artifacts.execute_fns;
     let query_fn = &artifacts.query_fn;
     let query_link_name = LitStr::new(&artifacts.query_link_name, Span::call_site());
@@ -294,6 +296,8 @@ pub(super) fn expand(
                 rodata_size: #rodata_size,
                 total_flash_size: #total_flash_size,
                 ram_size: #ram_size,
+                stack_size: #stack_size,
+                total_ram_size: #total_ram_size,
             };
         }
 

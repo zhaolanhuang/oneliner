@@ -1,9 +1,9 @@
 #![no_std]
 #![no_main]
 
+use defmt::{error, info};
 use embassy_executor::Spawner;
 use {defmt_rtt as _, panic_probe as _};
-use defmt::{info, error};
 
 use oneliner::model;
 use oneliner::runtime::{ModelInference, ModelSource};
@@ -15,7 +15,8 @@ struct Model;
 const INPUT_LEN: usize = 28 * 28 * 1;
 const OUTPUT_LEN: usize = 10;
 const EXPECTED: [f32; OUTPUT_LEN] = [0.0; OUTPUT_LEN];
-static INPUT_CELL: ConstStaticCell<<Model as ModelInference>::InputTensor> = ConstStaticCell::new(<Model as ModelInference>::InputTensor::new(0.0));
+static INPUT_CELL: ConstStaticCell<<Model as ModelInference>::InputTensor> =
+    ConstStaticCell::new(<Model as ModelInference>::InputTensor::new(0.0));
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -23,12 +24,14 @@ async fn main(_spawner: Spawner) {
     let artifacts = <Model as ModelSource>::ARTIFACTS;
 
     info!(
-        "Flash usage: params={} code={} rodata={} total={} | RAM usage: arena={} input={} output={}",
+        "Flash usage: params={} code={} rodata={} total={} | RAM usage: arena={} stack={} total={} input={} output={}",
         artifacts.params_size,
         artifacts.code_size,
         artifacts.rodata_size,
         artifacts.total_flash_size,
         artifacts.ram_size,
+        artifacts.stack_size,
+        artifacts.total_ram_size,
         artifacts.input_size,
         artifacts.output_size
     );

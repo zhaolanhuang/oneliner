@@ -69,16 +69,26 @@ class CircularMemoryAndBudgetTests(unittest.TestCase):
           %a = stream.resource.alloca : !stream.resource<transient>{%c96}
           %b = stream.resource.alloca : !stream.resource<transient>{%c32}
         """
-        self.assertEqual(parse_stream_arena(stream), (96, [96, 32]))
+        self.assertEqual(parse_stream_arena(stream), (128, [96, 32]))
         executable = """
-          llvm.func @kernel() {
+          llvm.func @small() {
             %c18 = llvm.mlir.constant(18 : index) : i64
             %c2 = llvm.mlir.constant(2 : index) : i64
             %0 = llvm.alloca %c18 x i8 {alignment = 4 : i64} : (i64) -> !llvm.ptr
             %1 = llvm.alloca %c2 x i32 {alignment = 8 : i64} : (i64) -> !llvm.ptr
           }
+          llvm.func @large() {
+            %c18 = llvm.mlir.constant(96 : index) : i32
+            %c2 = llvm.mlir.constant(4704 : index) : i32
+            %c160 = llvm.mlir.constant(160 : index) : i32
+            %0 = llvm.alloca %c18 x i8 {alignment = 64 : i64} : (i32) -> !llvm.ptr
+            %1 = llvm.alloca %c2 x i8 {alignment = 64 : i64} : (i32) -> !llvm.ptr
+            %2 = llvm.alloca %c160 x i32 {alignment = 64 : i64} : (i32) -> !llvm.ptr
+          }
         """
-        self.assertEqual(parse_llvm_static_allocas(executable)[0], 32)
+        maximum, functions = parse_llvm_static_allocas(executable)
+        self.assertEqual(functions, {"small": 32, "large": 5504})
+        self.assertEqual(maximum, 5504)
     @unittest.skipUnless(
         shutil.which("iree-compile"),
         "iree-compile is required",

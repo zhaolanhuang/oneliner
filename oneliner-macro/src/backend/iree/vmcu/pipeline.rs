@@ -5,13 +5,14 @@ use std::process::Command;
 use proc_macro2::Span;
 
 use super::options::{EnabledOptions, Mode, Search};
-use super::plan::{load_compact_io, CompactIo};
+use super::plan::{load_compact_io, load_resource_usage, CompactIo, ResourceUsage};
 use crate::backend::iree::toolchain::{python_executable, Compiler};
 use crate::utils::{run_command, rust_ident};
 
 pub(crate) struct Deployment {
     pub(crate) dump_stem: String,
     pub(crate) compact_io: Option<CompactIo>,
+    pub(crate) resources: ResourceUsage,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,9 +39,9 @@ pub(crate) fn compile(
     compiler.compile_from_preprocessing(&rewritten, vmfb, object, ir_dump_dir)?;
 
     let rewritten_stem = file_stem(&rewritten, "vmcu_rewritten");
-    if run_resource_report(&plan, object, ir_dump_dir, &rewritten_stem, "rewritten")?
-        == ResourceStatus::ExceedsBudget
-    {
+    let rewritten_resources =
+        run_resource_report(&plan, object, ir_dump_dir, &rewritten_stem, "rewritten")?;
+    if rewritten_resources.status == ResourceStatus::ExceedsBudget {
         match options.mode {
             Mode::Strict => {
                 return Err(syn::Error::new(
@@ -51,14 +52,14 @@ pub(crate) fn compile(
             Mode::Auto => {
                 compiler.compile_from_preprocessing(&preprocessing, vmfb, object, ir_dump_dir)?;
                 let fallback_stem = file_stem(&preprocessing, "vmcu_preprocessing");
-                if run_resource_report(
+                let fallback_resources = run_resource_report(
                     &plan,
                     object,
                     ir_dump_dir,
                     &fallback_stem,
                     "baseline-fallback",
-                )? == ResourceStatus::ExceedsBudget
-                {
+                )?;
+                if fallback_resources.status == ResourceStatus::ExceedsBudget {
                     return Err(syn::Error::new(
                         Span::call_site(),
                         "baseline fallback also exceeds vmcu_sram; see vmcu.plan.json",
@@ -68,6 +69,7 @@ pub(crate) fn compile(
                 return Ok(Deployment {
                     dump_stem: fallback_stem,
                     compact_io: None,
+                    resources: fallback_resources.usage,
                 });
             }
         }
@@ -77,7 +79,13 @@ pub(crate) fn compile(
     Ok(Deployment {
         dump_stem: rewritten_stem,
         compact_io: load_compact_io(&plan)?,
+        resources: rewritten_resources.usage,
     })
+}
+
+struct ResourceReport {
+    status: ResourceStatus,
+    usage: ResourceUsage,
 }
 
 fn run_rewriter(
@@ -120,7 +128,7 @@ fn run_resource_report(
     ir_dump_dir: &Path,
     dump_stem: &str,
     deployment: &str,
-) -> syn::Result<ResourceStatus> {
+) -> syn::Result<ResourceReport> {
     let reporter = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("python")
         .join("report_vmcu_resources.py");
@@ -145,14 +153,18 @@ fn run_resource_report(
             format!("failed to start vMCU resource analyzer: {error}"),
         )
     })?;
-    match status.code() {
-        Some(0) => Ok(ResourceStatus::WithinBudget),
-        Some(3) => Ok(ResourceStatus::ExceedsBudget),
+    let status = match status.code() {
+        Some(0) => ResourceStatus::WithinBudget,
+        Some(3) => ResourceStatus::ExceedsBudget,
         code => Err(syn::Error::new(
             Span::call_site(),
             format!("vMCU resource analyzer failed with status {code:?}"),
-        )),
-    }
+        ))?,
+    };
+    Ok(ResourceReport {
+        status,
+        usage: load_resource_usage(plan)?,
+    })
 }
 
 fn file_stem(path: &Path, fallback: &str) -> String {

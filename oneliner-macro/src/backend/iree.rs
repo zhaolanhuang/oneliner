@@ -47,6 +47,13 @@ struct IoView {
     size: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RamUsage {
+    transient_size: usize,
+    stack_size: usize,
+    total_size: usize,
+}
+
 #[derive(Debug)]
 enum IoLayout {
     Separate {
@@ -88,7 +95,7 @@ struct IreeArtifacts {
     params_size: usize,
     code_size: usize,
     rodata_size: usize,
-    ram_size: usize,
+    ram: RamUsage,
 }
 
 /// Compiles IREE artifacts and emits the user-facing model implementation.
@@ -106,7 +113,7 @@ pub fn expand(
     let code_size = artifacts.code_size;
     let rodata_size = artifacts.rodata_size;
     let total_flash_size = params_size + code_size + rodata_size;
-    let ram_size = artifacts.ram_size;
+    let ram = artifacts.ram;
     let input_size = artifacts.io.input_size();
     let output_size = artifacts.io.output_size();
 
@@ -127,20 +134,26 @@ pub fn expand(
     );
     match &artifacts.io {
         IoLayout::InPlace { storage_size, .. } => eprintln!(
-            "  RAM Usage: io_pool = {} B ({} KiB), transient arena = {} B ({} KiB), input = {} B ({} KiB), output = {} B ({} KiB)",
+            "  RAM Usage: io_pool = {} B ({} KiB), transient arena = {} B ({} KiB), stack = {} B ({} KiB), total = {} B ({} KiB), input view = {} B, output view = {} B",
             storage_size,
             storage_size / 1024,
-            ram_size,
-            ram_size / 1024,
+            ram.transient_size,
+            ram.transient_size / 1024,
+            ram.stack_size,
+            ram.stack_size / 1024,
+            ram.total_size,
+            ram.total_size / 1024,
             input_size,
-            input_size / 1024,
             output_size,
-            output_size / 1024,
         ),
         IoLayout::Separate { .. } => eprintln!(
-            "  RAM Usage: arena = {} B ({} KiB), input = {} B ({} KiB), output = {} B ({} KiB)",
-            ram_size,
-            ram_size / 1024,
+            "  RAM Usage: transient arena = {} B ({} KiB), stack = {} B ({} KiB), total model-managed = {} B ({} KiB), external input = {} B ({} KiB), external output = {} B ({} KiB)",
+            ram.transient_size,
+            ram.transient_size / 1024,
+            ram.stack_size,
+            ram.stack_size / 1024,
+            ram.total_size,
+            ram.total_size / 1024,
             input_size,
             input_size / 1024,
             output_size,

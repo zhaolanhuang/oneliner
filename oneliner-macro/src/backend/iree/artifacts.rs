@@ -10,7 +10,7 @@ use super::metadata::load_metadata;
 use super::object_size::measure_object;
 use super::toolchain::{run_converter, Compiler};
 use super::vmcu;
-use super::{ArtifactPaths, IreeArtifacts};
+use super::{ArtifactPaths, IoLayout, IreeArtifacts, RamUsage};
 use crate::frontend::{Model, TensorInfo};
 use crate::utils::{required_path_env, rust_ident};
 
@@ -45,7 +45,7 @@ pub(super) fn build(
     let vmfb_path = artifact_dir.join(format!("{model_stem}.vmfb"));
     let object_path = artifact_dir.join(format!("{model_stem}.o"));
 
-    let (final_dump_stem, compact_io) = match vmcu_options {
+    let (final_dump_stem, compact_io, vmcu_resources) = match vmcu_options {
         vmcu::Options::Disabled => {
             Compiler::new(None)?.compile_full(
                 &compile_input_path,
@@ -53,7 +53,7 @@ pub(super) fn build(
                 &object_path,
                 &ir_dump_dir,
             )?;
-            (ir_dump_stem, None)
+            (ir_dump_stem, None, None)
         }
         vmcu::Options::Enabled(options) => {
             let deployment = vmcu::compile(
@@ -64,7 +64,11 @@ pub(super) fn build(
                 &ir_dump_dir,
                 &artifact_dir,
             )?;
-            (deployment.dump_stem, deployment.compact_io)
+            (
+                deployment.dump_stem,
+                deployment.compact_io,
+                Some(deployment.resources),
+            )
         }
     };
     let (query_fn, query_link_name) = parse_query_function(&object_path)?;
@@ -77,6 +81,7 @@ pub(super) fn build(
 
     let metadata = load_metadata(&metadata_json)?;
     let io = vmcu::resolve_io(metadata.io, compact_io)?;
+    let ram = resolve_ram_usage(&io, metadata.ram_size, vmcu_resources)?;
     validate_tensor_size("input", io.input_size(), &model_io.input)?;
     validate_tensor_size("output", io.output_size(), &model_io.output)?;
 
@@ -98,7 +103,52 @@ pub(super) fn build(
         params_size: metadata.params_size,
         code_size: footprint.code_size,
         rodata_size: footprint.rodata_size,
-        ram_size: metadata.ram_size,
+        ram,
+    })
+}
+
+fn resolve_ram_usage(
+    io: &IoLayout,
+    flow_transient_size: usize,
+    vmcu_resources: Option<vmcu::ResourceUsage>,
+) -> syn::Result<RamUsage> {
+    let Some(resources) = vmcu_resources else {
+        return Ok(RamUsage {
+            transient_size: flow_transient_size,
+            stack_size: 0,
+            total_size: flow_transient_size,
+        });
+    };
+    let io_pool_size = match io {
+        IoLayout::InPlace { storage_size, .. } => *storage_size,
+        IoLayout::Separate { .. } => 0,
+    };
+    if resources.io_pool_size != io_pool_size {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "vMCU resource report and deployed I/O pool sizes differ",
+        ));
+    }
+    if resources.transient_size != flow_transient_size {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "vMCU resource report and generated Flow transient arena sizes differ",
+        ));
+    }
+    let total_size = io_pool_size
+        .checked_add(flow_transient_size)
+        .and_then(|size| size.checked_add(resources.stack_size))
+        .ok_or_else(|| syn::Error::new(Span::call_site(), "RAM usage overflows usize"))?;
+    if resources.total_size != total_size {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "vMCU resource report total does not match its deployed components",
+        ));
+    }
+    Ok(RamUsage {
+        transient_size: flow_transient_size,
+        stack_size: resources.stack_size,
+        total_size,
     })
 }
 

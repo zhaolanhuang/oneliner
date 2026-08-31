@@ -13,7 +13,7 @@ _ELEMENT_BYTES = {"i8": 1, "i16": 2, "i32": 4, "i64": 8, "f32": 4, "f64": 8}
 
 
 def parse_stream_arena(stream_text: str) -> tuple[int, list[int]]:
-    """Returns the largest static transient allocation in Stream IR."""
+    """Returns all simultaneously resident static Stream allocations."""
     constants = {
         name: int(value)
         for name, value in re.findall(
@@ -29,26 +29,20 @@ def parse_stream_arena(stream_text: str) -> tuple[int, list[int]]:
         if token not in constants:
             raise ValueError(f"unresolved transient arena size: {token}")
         allocations.append(constants[token])
-    return max(allocations, default=0), allocations
+    return sum(allocations), allocations
 
 
 def parse_llvm_static_allocas(executable_text: str) -> tuple[int, dict[str, int]]:
     """Conservatively aligns static LLVM allocas per lowered function."""
-    constants = {
-        name: int(value)
-        for name, value in re.findall(
-            r"(%[\w.$-]+)\s*=\s*llvm\.mlir\.constant\((\d+)\s*:\s*index\)",
-            executable_text,
-        )
-    }
     totals: dict[str, int] = {}
-    current = "module"
+    constants: dict[str, int] = {}
+    current: str | None = None
     offset = 0
     maximum_alignment = 1
 
     def finish() -> None:
         """Stores the current function's final alignment-rounded estimate."""
-        if offset:
+        if current is not None and offset:
             totals[current] = align_up(offset, maximum_alignment)
 
     for line in executable_text.splitlines():
@@ -56,9 +50,18 @@ def parse_llvm_static_allocas(executable_text: str) -> tuple[int, dict[str, int]
         if function:
             finish()
             current = function.group(1)
+            constants = {}
             offset = 0
             maximum_alignment = 1
             continue
+        if current is None:
+            continue
+        constant = re.search(
+            r"(%[\w.$-]+)\s*=\s*llvm\.mlir\.constant\((\d+)\s*:\s*index\)",
+            line,
+        )
+        if constant:
+            constants[constant.group(1)] = int(constant.group(2))
         allocation = re.search(
             r"llvm\.alloca\s+(%[\w.$-]+)\s+x\s+(i8|i16|i32|i64|f32|f64)"
             r"\s+\{alignment\s*=\s*(\d+)",
@@ -85,7 +88,7 @@ def finalize_resource_plan(
     *,
     deployment: str = "rewritten",
 ) -> dict[str, Any]:
-    """Adds authoritative lowering metrics and evaluates ``vmcu_sram``."""
+    """Adds post-lowering resource metrics and evaluates ``vmcu_sram``."""
     if deployment not in ("rewritten", "baseline-fallback"):
         raise ValueError(f"unsupported deployment kind: {deployment}")
     arena_bytes, transient_allocations = parse_stream_arena(stream_text)

@@ -12,11 +12,32 @@ pub(crate) struct CompactIo {
     pub(super) output_size: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResourceUsage {
+    pub(crate) io_pool_size: usize,
+    pub(crate) transient_size: usize,
+    pub(crate) stack_size: usize,
+    pub(crate) total_size: usize,
+}
+
 #[derive(Deserialize)]
 struct VmcuPlan {
     schema_version: usize,
     applied: bool,
     compact_graph: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct ResourcePlan {
+    resources: Resources,
+}
+
+#[derive(Deserialize)]
+struct Resources {
+    arena_bytes: usize,
+    io_pool_allocated_bytes: usize,
+    stack_bytes: usize,
+    total_sram_bytes: usize,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +113,19 @@ pub(super) fn load_compact_io(path: &Path) -> syn::Result<Option<CompactIo>> {
         output_offset,
         output_size: output.size_bytes,
     }))
+}
+
+pub(super) fn load_resource_usage(path: &Path) -> syn::Result<ResourceUsage> {
+    let plan: ResourcePlan = serde_json::from_str(
+        &fs::read_to_string(path).map_err(|error| syn::Error::new(Span::call_site(), error))?,
+    )
+    .map_err(|error| syn::Error::new(Span::call_site(), error))?;
+    Ok(ResourceUsage {
+        io_pool_size: plan.resources.io_pool_allocated_bytes,
+        transient_size: plan.resources.arena_bytes,
+        stack_size: plan.resources.stack_bytes,
+        total_size: plan.resources.total_sram_bytes,
+    })
 }
 
 fn unique_graph_tensor(tensors: &[CompactTensor], input: bool) -> syn::Result<&CompactTensor> {

@@ -12,7 +12,7 @@ mod plan;
 pub(super) use codegen::compact_fragments;
 pub(super) use options::Options;
 pub(super) use pipeline::compile;
-pub(super) use plan::CompactIo;
+pub(super) use plan::{CompactIo, ResourceUsage};
 
 use proc_macro2::Span;
 

@@ -23,6 +23,8 @@ pub fn assert_artifacts<M: ModelSource>(model_name: &str) {
         rodata_size,
         total_flash_size,
         ram_size,
+        stack_size,
+        total_ram_size,
     } = M::ARTIFACTS;
 
     assert_eq!(backend, "iree", "{model_name}: unexpected backend");
@@ -44,6 +46,7 @@ pub fn assert_artifacts<M: ModelSource>(model_name: &str) {
         "{model_name}: total flash must equal params + code + rodata"
     );
     let _ = ram_size;
+    assert!(total_ram_size >= ram_size + stack_size);
     let _ = (io_pool_size, input_offset, output_offset);
 
     assert!(

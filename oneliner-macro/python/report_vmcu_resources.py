@@ -47,15 +47,7 @@ def run(arguments: list[str] | None = None) -> int:
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
         print(f"vMCU resource analysis failed: {error}", file=sys.stderr)
         return 2
-    resources = plan["resources"]
-    print(
-        "vMCU resources: "
-        f"io_pool={resources['io_pool_allocated_bytes']} "
-        f"arena={resources['arena_bytes']} stack={resources['stack_bytes']} "
-        f"workspace={resources['workspace_bytes']} total={resources['total_sram_bytes']} "
-        f"status={resources['status']}"
-    )
-    return 3 if resources["status"] == "exceeds-budget" else 0
+    return 3 if plan["resources"]["status"] == "exceeds-budget" else 0
 
 
 def main() -> None:
