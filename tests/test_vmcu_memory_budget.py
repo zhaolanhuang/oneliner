@@ -14,7 +14,7 @@ REWRITER = PYTHON_DIR / "oneliner_vmcu" / "cli.py"
 REPORTER = PYTHON_DIR / "oneliner_vmcu" / "resource_cli.py"
 sys.path.insert(0, str(PYTHON_DIR))
 
-from oneliner_vmcu import RewriteError, rewrite_text  # noqa: E402
+from oneliner_vmcu import rewrite_text  # noqa: E402
 from oneliner_vmcu.memory import (  # noqa: E402
     CircularMemoryPlan,
     SegmentLifetime,
@@ -50,15 +50,13 @@ class CircularMemoryAndBudgetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no safe circular output offset"):
             plan_circular_memory(inputs, outputs, 2, 4)
 
-    def test_workspace_budget_auto_falls_back_and_strict_fails(self):
+    def test_workspace_budget_falls_back_below_fixed_schedule_size(self):
         """A 47-byte cap cannot silently select the fixed 48-byte workspace."""
-        automatic = rewrite_text(self.source, "auto", sram_budget=47)
-        self.assertEqual(automatic.text, self.source)
-        self.assertFalse(automatic.plan["applied"])
-        self.assertIn("required=48 budget=47", automatic.plan["rejected"][0]["reason"])
-        with self.assertRaisesRegex(RewriteError, "workspace exceeds vmcu_sram"):
-            rewrite_text(self.source, "strict", sram_budget=47)
-        accepted = rewrite_text(self.source, "strict", sram_budget=48)
+        result = rewrite_text(self.source, sram_budget=47)
+        self.assertEqual(result.text, self.source)
+        self.assertFalse(result.plan["applied"])
+        self.assertIn("required=48 budget=47", result.plan["rejected"][0]["reason"])
+        accepted = rewrite_text(self.source, sram_budget=48)
         self.assertEqual(accepted.plan["resources"]["workspace_bytes"], 48)
 
     def test_resource_parsers_measure_arena_and_alloca_stack(self):
@@ -134,8 +132,6 @@ class CircularMemoryAndBudgetTests(unittest.TestCase):
                     str(rewritten),
                     "--plan-output",
                     str(plan),
-                    "--mode",
-                    "strict",
                     "--sram-budget",
                     "4096",
                 ],
@@ -257,8 +253,6 @@ class CircularMemoryAndBudgetTests(unittest.TestCase):
                     str(rewritten),
                     "--plan-output",
                     str(plan),
-                    "--mode",
-                    "strict",
                 ],
                 check=True,
                 capture_output=True,

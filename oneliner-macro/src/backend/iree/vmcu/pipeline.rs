@@ -4,7 +4,7 @@ use std::process::Command;
 
 use proc_macro2::Span;
 
-use super::options::{EnabledOptions, Mode, Search};
+use super::options::{EnabledOptions, Search};
 use super::plan::{load_compact_io, load_resource_usage, CompactIo, ResourceUsage};
 use crate::backend::iree::toolchain::{python_executable, Compiler};
 use crate::utils::{run_command, rust_ident};
@@ -42,37 +42,27 @@ pub(crate) fn compile(
     let rewritten_resources =
         run_resource_report(&plan, object, ir_dump_dir, &rewritten_stem, "rewritten")?;
     if rewritten_resources.status == ResourceStatus::ExceedsBudget {
-        match options.mode {
-            Mode::Strict => {
-                return Err(syn::Error::new(
-                    Span::call_site(),
-                    "rewritten object exceeds vmcu_sram; see vmcu.plan.json",
-                ));
-            }
-            Mode::Auto => {
-                compiler.compile_from_preprocessing(&preprocessing, vmfb, object, ir_dump_dir)?;
-                let fallback_stem = file_stem(&preprocessing, "vmcu_preprocessing");
-                let fallback_resources = run_resource_report(
-                    &plan,
-                    object,
-                    ir_dump_dir,
-                    &fallback_stem,
-                    "baseline-fallback",
-                )?;
-                if fallback_resources.status == ResourceStatus::ExceedsBudget {
-                    return Err(syn::Error::new(
-                        Span::call_site(),
-                        "baseline fallback also exceeds vmcu_sram; see vmcu.plan.json",
-                    ));
-                }
-                eprintln!("[oneliner] vMCU auto fallback selected baseline for SRAM budget");
-                return Ok(Deployment {
-                    dump_stem: fallback_stem,
-                    compact_io: None,
-                    resources: fallback_resources.usage,
-                });
-            }
+        compiler.compile_from_preprocessing(&preprocessing, vmfb, object, ir_dump_dir)?;
+        let fallback_stem = file_stem(&preprocessing, "vmcu_preprocessing");
+        let fallback_resources = run_resource_report(
+            &plan,
+            object,
+            ir_dump_dir,
+            &fallback_stem,
+            "baseline-fallback",
+        )?;
+        if fallback_resources.status == ResourceStatus::ExceedsBudget {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "baseline fallback also exceeds vmcu_sram; see vmcu.plan.json",
+            ));
         }
+        eprintln!("[oneliner] vMCU auto fallback selected baseline for SRAM budget");
+        return Ok(Deployment {
+            dump_stem: fallback_stem,
+            compact_io: None,
+            resources: fallback_resources.usage,
+        });
     }
 
     eprintln!("[oneliner] vMCU rewrite report: {}", plan.display());
@@ -106,8 +96,6 @@ fn run_rewriter(
         .arg(rewritten)
         .arg("--plan-output")
         .arg(plan)
-        .arg("--mode")
-        .arg(options.mode.as_str())
         .arg("--schedule-search")
         .arg(options.search.as_str())
         .arg("--iree-compile")

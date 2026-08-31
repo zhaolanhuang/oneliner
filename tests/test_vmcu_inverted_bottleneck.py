@@ -121,7 +121,7 @@ class FixedInvertedBottleneckTests(unittest.TestCase):
 
     def test_residual_ibn_rewrites_as_one_composite_transaction(self):
         """The three operators and add become the sole eleven-segment pattern."""
-        result = rewrite_text(self.source, "strict")
+        result = rewrite_text(self.source)
         self.assertEqual(result.plan["totals"]["accepted"], 1)
         self.assertEqual(result.plan["totals"]["rejected"], 0)
         accepted = result.plan["accepted"][0]
@@ -140,7 +140,7 @@ class FixedInvertedBottleneckTests(unittest.TestCase):
     def test_no_residual_stride_two_boundary_padding_is_supported(self):
         """The same unique schedule handles downsampling without a skip edge."""
         source = _make_stride_two(self.source)
-        result = rewrite_text(source, "strict")
+        result = rewrite_text(source)
         self.assertEqual(result.plan["totals"]["accepted"], 1)
         accepted = result.plan["accepted"][0]
         self.assertFalse(accepted["residual"])
@@ -151,7 +151,7 @@ class FixedInvertedBottleneckTests(unittest.TestCase):
     def test_unequal_module_channels_use_cout_for_the_d_segment(self):
         """Cin != Cout keeps B/C lanes at min(Cin, Cout) and sizes D by Cout."""
         source = _make_unequal_channels(self.source)
-        result = rewrite_text(source, "strict")
+        result = rewrite_text(source)
         self.assertEqual(result.plan["totals"]["accepted"], 1)
         self.assertEqual(result.plan["totals"]["rejected"], 0)
         accepted = result.plan["accepted"][0]
@@ -170,8 +170,8 @@ class FixedInvertedBottleneckTests(unittest.TestCase):
         renamed = self.source.replace("@semantic_ibn", "@unrelated_network_block")
         renamed = renamed.replace("%input", "%arbitrary_activation")
         renamed = renamed.replace("%exp_", "%stage_alpha_")
-        baseline = rewrite_text(self.source, "strict")
-        result = rewrite_text(renamed, "strict")
+        baseline = rewrite_text(self.source)
+        result = rewrite_text(renamed)
         self.assertEqual(result.plan["totals"], baseline.plan["totals"])
         self.assertEqual(
             result.plan["accepted"][0]["schedule"],
@@ -304,8 +304,6 @@ class FixedInvertedBottleneckTests(unittest.TestCase):
                     str(rewritten),
                     "--plan-output",
                     str(plan),
-                    "--mode",
-                    "strict",
                 ],
                 check=True,
                 capture_output=True,

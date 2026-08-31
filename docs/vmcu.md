@@ -23,8 +23,8 @@ This pipeline runs between IREE's `preprocessing` and dispatch-creation phases:
 struct MyModel;
 ```
 
-All modes implement the same `ModelInference` API. In `auto` and `strict`, the
-generated model instance owns the compact I/O pool: `run` copies the owned
+The generated model implements the standard `ModelInference` API and owns the
+compact I/O pool: `run` copies the owned
 input tensor into its planned input view, executes in place, and copies the
 planned output view into the returned owned output tensor. The pool is not
 exposed to callers.
@@ -34,8 +34,8 @@ exposed to callers.
 The compact graph folds reshape/collapse/expand views and absorbs static
 padding as zero-point reads. It supports quantized int8 Conv2D, Depthwise,
 fully connected, and inverted bottleneck candidates. Unsupported operations
-form materialization boundaries in `auto`; `strict` requires complete compact
-coverage from the model input to output.
+form materialization boundaries when they cannot be scalarized directly over
+the compact pool.
 
 Static identity-map quantized residual expression trees and terminal NHWC sum
 pooling are scalarized directly from pool reads to pool writes. They remain DAG
@@ -124,8 +124,8 @@ pool. Those interface tensors are shown separately in the Rust build report.
 
 Local B/C/D workspace is reported separately but is not added twice when it is
 already resident in the measured object stack. `vmcu_sram` is a deployment
-gate: `strict` fails above the limit; `auto` can fall back to the immutable
-preprocessing module and validates that deployment independently.
+gate: an over-budget compact result falls back to the immutable preprocessing
+module and validates that deployment independently.
 
 The main artifacts are `vmcu.preprocessing.mlir`, `vmcu.rewritten.mlir`,
 `vmcu.plan.json`, generated Flow Rust/JSON metadata, and the final object-level

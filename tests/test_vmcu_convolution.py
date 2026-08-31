@@ -37,7 +37,7 @@ class QuantizedConvolutionTests(unittest.TestCase):
 
     def test_rewrites_conv_and_depthwise_without_full_accumulators(self):
         """Both operators become direct i8-producing scalar reductions."""
-        result = rewrite_text(self.source, "strict")
+        result = rewrite_text(self.source)
         kinds = [item["kind"] for item in result.plan["accepted"]]
         self.assertEqual(kinds, ["quantized_conv2d", "quantized_depthwise_conv2d"])
         self.assertNotIn("linalg.conv_2d_nhwc_hwcf_q", result.text)
@@ -50,7 +50,7 @@ class QuantizedConvolutionTests(unittest.TestCase):
         """Synthetic network identity is irrelevant to semantic acceptance."""
         renamed = self.source.replace("@synthetic_conv", "@not_mcunet")
         renamed = renamed.replace("@unrelated_depthwise_network", "@any_model")
-        result = rewrite_text(renamed, "strict")
+        result = rewrite_text(renamed)
         self.assertEqual(result.plan["totals"]["accepted"], 2)
 
     def test_complete_registry_is_reanalyzed_after_each_emitter(self):
@@ -64,7 +64,7 @@ class QuantizedConvolutionTests(unittest.TestCase):
             return Analysis([], [])
 
         registry.register("analysis_counter", count_analysis, lambda match: None)
-        result = rewrite_text(self.source, "strict", registry=registry)
+        result = rewrite_text(self.source, registry=registry)
         accepted = result.plan["totals"]["accepted"]
         self.assertEqual(accepted, 2)
         self.assertEqual(analysis_calls, accepted + 2)
@@ -84,8 +84,6 @@ class QuantizedConvolutionTests(unittest.TestCase):
                     str(rewritten),
                     "--plan-output",
                     str(plan),
-                    "--mode",
-                    "strict",
                 ],
                 text=True,
                 capture_output=True,
@@ -109,7 +107,7 @@ class QuantizedConvolutionTests(unittest.TestCase):
             "%weight_zp_i8 = arith.constant 2 : i8\n    %weight_zp = arith.constant 2 : i32",
             1,
         )
-        result = rewrite_text(modified, "auto")
+        result = rewrite_text(modified)
         self.assertEqual(result.plan["totals"]["accepted"], 1)
         self.assertIn("linalg.conv_2d_nhwc_hwcf_q", result.text)
         self.assertTrue(any("padding value" in item["reason"] for item in result.plan["rejected"]))
@@ -120,7 +118,7 @@ class QuantizedConvolutionTests(unittest.TestCase):
             "low[%c0, %c1, %c1, %c0] high[%c0, %c1, %c1, %c0]",
             "low[0, 1, 0, 0] high[0, 1, 2, 0]",
         )
-        result = rewrite_text(modified, "strict")
+        result = rewrite_text(modified)
         self.assertEqual(result.plan["totals"]["accepted"], 2)
         self.assertEqual(result.plan["totals"]["rejected"], 0)
 
@@ -135,14 +133,14 @@ class QuantizedConvolutionTests(unittest.TestCase):
             "low[%c0, %dynamic, %c1, %c0]",
             1,
         )
-        result = rewrite_text(modified, "auto")
+        result = rewrite_text(modified)
         self.assertEqual(result.plan["totals"]["accepted"], 1)
         self.assertTrue(any("padding low index" in item["reason"] for item in result.plan["rejected"]))
 
     def test_shared_zero_fill_is_reused_until_the_last_depthwise_emit(self):
         """Two depthwise roots may safely share one pure zero initializer."""
         source = SHARED_DEPTHWISE_FIXTURE.read_text(encoding="utf-8")
-        result = rewrite_text(source, "strict")
+        result = rewrite_text(source)
         self.assertEqual(result.plan["totals"]["accepted"], 2)
         self.assertEqual(result.plan["totals"]["rejected"], 0)
         self.assertNotIn("linalg.depthwise_conv_2d_nhwc_hwcm_q", result.text)
@@ -203,7 +201,7 @@ class QuantizedConvolutionTests(unittest.TestCase):
             )
             tail = tail.replace("tensor<1x6x6x3xi8>", f"tensor<1x{4 + 2 * pad}x{4 + 2 * pad}x3xi8>")
             tail = tail.replace("tensor<3x3x3x1xi8>", f"tensor<{kernel}x{kernel}x3x1xi8>")
-            result = rewrite_text(prefix + tail, "strict")
+            result = rewrite_text(prefix + tail)
             self.assertEqual(result.plan["totals"]["accepted"], 2)
             self.assertEqual(result.plan["totals"]["rejected"], 0)
             self.assertNotIn("linalg.depthwise_conv_2d_nhwc_hwcm_q", result.text)
@@ -328,8 +326,6 @@ class QuantizedConvolutionTests(unittest.TestCase):
                     str(rewritten),
                     "--plan-output",
                     str(plan),
-                    "--mode",
-                    "strict",
                 ],
                 check=True,
                 capture_output=True,

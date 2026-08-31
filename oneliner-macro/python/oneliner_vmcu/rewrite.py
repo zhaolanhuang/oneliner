@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from math import prod
-from typing import Any, Literal
+from typing import Any
 
 from iree.compiler import ir
 from .ir_utils import verify
@@ -26,11 +26,6 @@ from .compact_analysis import (
     rebind_compact_analysis,
 )
 from .pool_emitter import emit_compact_graph
-
-
-# Only enabled modes reach Python; Rust handles the disabled `off` path without
-# starting a preprocessing split or Python process.
-Mode = Literal["auto", "strict"]
 
 
 class RewriteError(RuntimeError):
@@ -147,7 +142,6 @@ def _require_next_candidate(
 
 def _plan(
     source_text: str,
-    mode: Mode,
     analysis: Analysis,
     applied: bool,
     versions: CompilerVersionDiagnostics,
@@ -189,7 +183,6 @@ def _plan(
         ]
     return {
         "schema_version": 4,
-        "mode": mode,
         "applied": applied,
         "source_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
         "iree_versions": versions.to_dict(),
@@ -241,7 +234,6 @@ def _plan(
 
 def rewrite_text(
     source_text: str,
-    mode: Mode = "auto",
     iree_compile: str | None = None,
     registry: PatternRegistry | None = None,
     sram_budget: int | None = None,
@@ -259,8 +251,6 @@ def rewrite_text(
     produce the exact same candidate identities before any edit is made. The
     final serialized module is verified and reparsed before being returned.
     """
-    if mode not in ("auto", "strict"):
-        raise RewriteError(f"unsupported rewrite mode: {mode}")
     if sram_budget is not None and sram_budget <= 0:
         raise RewriteError("sram_budget must be a positive byte count")
     if schedule_search not in ("bounded", "optimal", "greedy"):
@@ -287,7 +277,6 @@ def rewrite_text(
             _candidate_signature(candidate) for candidate in source_analysis.matches
         )
         source_compact = None
-        compact_error = None
         if source_analysis.matches and use_compact_emitter:
             try:
                 source_compact = build_compact_analysis(
@@ -295,35 +284,15 @@ def rewrite_text(
                     search_mode=schedule_search,
                     search_state_limit=search_state_limit,
                 )
-            except ValueError as error:
-                compact_error = str(error)
-            if (
-                source_compact is not None
-                and mode == "strict"
-                and any(item.direct_kind is None for item in source_compact.boundaries)
-            ):
-                materialized_count = sum(
-                    item.direct_kind is None for item in source_compact.boundaries
-                )
-                compact_error = (
-                    "strict mode requires full compact coverage, but found "
-                    f"{materialized_count} materialized boundaries"
-                )
+            except ValueError:
                 source_compact = None
-        if compact_error is not None and mode == "strict":
-            raise RewriteError(compact_error)
     if not source_analysis.matches:
-        if mode == "strict":
-            reasons = "; ".join(item.reason for item in source_analysis.rejected[:3])
-            suffix = f": {reasons}" if reasons else ""
-            raise RewriteError(f"strict mode found no safe vMCU patterns{suffix}")
-        # Auto mode promises a byte-for-byte fallback, including formatting and
+        # Preserve a byte-for-byte fallback, including formatting and
         # dialect aliases, when no candidate is proven safe.
         return RewriteResult(
             source_text,
             _plan(
                 source_text,
-                mode,
                 source_analysis,
                 False,
                 versions,
@@ -337,14 +306,13 @@ def rewrite_text(
         )
 
     if use_compact_emitter and source_compact is None:
-        # Auto mode preserves the original module when no complete safe pool
+        # Preserve the original module when no complete safe pool
         # plan exists. A partial full-tensor rewrite would defeat the ABI and
         # make the schema-v4 SRAM report misleading.
         return RewriteResult(
             source_text,
             _plan(
                 source_text,
-                mode,
                 source_analysis,
                 False,
                 versions,
@@ -416,7 +384,6 @@ def rewrite_text(
         rewritten_text,
         _plan(
             source_text,
-            mode,
             source_analysis,
             True,
             versions,

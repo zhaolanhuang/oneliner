@@ -29,7 +29,7 @@ REAL_PREPROCESSING = (
 REAL_TARGET_DIRECTORY = REAL_PREPROCESSING.parent
 sys.path.insert(0, str(PYTHON_DIR))
 
-from oneliner_vmcu import RewriteError, rewrite_text  # noqa: E402
+from oneliner_vmcu import rewrite_text  # noqa: E402
 from oneliner_vmcu import compact_analysis as compact_analysis_module  # noqa: E402
 from oneliner_vmcu import compact_memory as compact_memory_module  # noqa: E402
 from oneliner_vmcu import rewrite as rewrite_module  # noqa: E402
@@ -50,7 +50,7 @@ class VmcuRewriterTests(unittest.TestCase):
 
     def test_rewrites_canonical_fc_without_an_i32_tensor_result(self):
         """A proven FC becomes a scalar reduction that directly yields int8."""
-        result = rewrite_text(self.source, "strict")
+        result = rewrite_text(self.source)
 
         self.assertTrue(result.plan["applied"])
         self.assertEqual(result.plan["totals"]["accepted"], 1)
@@ -121,7 +121,7 @@ class VmcuRewriterTests(unittest.TestCase):
             self.skipTest("iree-compile is unavailable")
         diagnostics = diagnose_compiler_versions(compiler)
         self.assertTrue(diagnostics.compatible, diagnostics.diagnostic)
-        result = rewrite_text(self.source, "strict", compiler)
+        result = rewrite_text(self.source, compiler)
         self.assertTrue(result.plan["iree_versions"]["compatible"])
 
     def test_matching_uses_ssa_edges_not_textual_adjacency(self):
@@ -132,47 +132,38 @@ class VmcuRewriterTests(unittest.TestCase):
             "    %output_init = tensor.empty()",
         )
 
-        result = rewrite_text(separated, "strict")
+        result = rewrite_text(separated)
 
         self.assertEqual(result.plan["totals"]["accepted"], 1)
         self.assertIn("%c99_i32", result.text)
 
-    def test_unrelated_function_declarations_do_not_block_auto_analysis(self):
+    def test_unrelated_function_declarations_do_not_block_analysis(self):
         """Unsupported declarations are ignored without hiding supported functions."""
         source = self.source.replace(
             "module {", "module {\n  func.func private @helper(i32) -> i32", 1
         )
 
-        result = rewrite_text(source, "strict")
+        result = rewrite_text(source)
 
         self.assertEqual(result.plan["totals"]["accepted"], 1)
 
-    def test_auto_mode_leaves_unmatched_input_byte_for_byte(self):
-        """Auto mode preserves formatting and content when no root is accepted."""
+    def test_unmatched_input_is_preserved_byte_for_byte(self):
+        """Formatting and content survive when no root is accepted."""
         source = (ROOT / "examples" / "models" / "abs2.mlir").read_text(
             encoding="utf-8"
         )
 
-        result = rewrite_text(source, "auto")
+        result = rewrite_text(source)
 
         self.assertEqual(result.text, source)
         self.assertFalse(result.plan["applied"])
         self.assertEqual(result.plan["totals"]["accepted"], 0)
 
-    def test_strict_mode_rejects_an_unmatched_module(self):
-        """Strict mode turns an empty accepted set into an actionable error."""
-        source = (ROOT / "examples" / "models" / "abs2.mlir").read_text(
-            encoding="utf-8"
-        )
-
-        with self.assertRaisesRegex(RewriteError, "no safe vMCU patterns"):
-            rewrite_text(source, "strict")
-
     def test_modified_clamp_is_rejected_without_partial_mutation(self):
         """Changing scalar semantics records a rejection and preserves the source."""
         modified = self.source.replace("arith.maxsi", "arith.minsi", 1)
 
-        result = rewrite_text(modified, "auto")
+        result = rewrite_text(modified)
 
         self.assertEqual(result.text, modified)
         self.assertEqual(result.plan["totals"]["accepted"], 0)
@@ -193,8 +184,6 @@ class VmcuRewriterTests(unittest.TestCase):
                     str(output),
                     "--plan-output",
                     str(plan),
-                    "--mode",
-                    "strict",
                 ],
                 text=True,
                 capture_output=True,
@@ -233,8 +222,6 @@ class VmcuRewriterTests(unittest.TestCase):
                     str(rewritten),
                     "--plan-output",
                     str(plan),
-                    "--mode",
-                    "auto",
                     "--iree-compile",
                     "iree-compile",
                 ],
@@ -399,7 +386,7 @@ class VmcuRewriterTests(unittest.TestCase):
             mock.patch.object(rewrite_module, "emit_compact_graph", emit),
         ):
             result = rewrite_module.rewrite_text(
-                REAL_PREPROCESSING.read_text(encoding="utf-8"), "auto"
+                REAL_PREPROCESSING.read_text(encoding="utf-8")
             )
 
         self.assertTrue(result.plan["applied"])
@@ -416,8 +403,8 @@ class VmcuRewriterTests(unittest.TestCase):
         renamed = renamed.replace("%input", "%model_argument")
         renamed = renamed.replace("%weight", "%constant_filter")
         renamed = renamed.replace("%output", "%final_value")
-        baseline = rewrite_text(self.source, "strict")
-        result = rewrite_text(renamed, "strict")
+        baseline = rewrite_text(self.source)
+        result = rewrite_text(renamed)
         self.assertEqual(result.plan["totals"], baseline.plan["totals"])
         self.assertEqual(
             result.plan["accepted"][0]["quantization"],
@@ -437,7 +424,7 @@ class VmcuRewriterTests(unittest.TestCase):
             raise AssertionError("no-match emitter must not run")
 
         registry.register("test_extension", no_matches, unreachable_emitter)
-        result = rewrite_text(self.source, "strict", registry=registry)
+        result = rewrite_text(self.source, registry=registry)
         self.assertEqual(result.plan["pattern_registry"][-1], "test_extension")
         self.assertIn("quantized_fully_connected", result.plan["pattern_registry"])
 
@@ -499,8 +486,6 @@ class VmcuRewriterTests(unittest.TestCase):
                     str(rewritten),
                     "--plan-output",
                     str(plan),
-                    "--mode",
-                    "strict",
                 ],
                 env=environment,
                 check=True,

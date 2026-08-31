@@ -23,7 +23,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("input", type=Path, help="preprocessing-phase textual MLIR")
     parser.add_argument("-o", "--output", type=Path, required=True)
     parser.add_argument("--plan-output", type=Path, required=True)
-    parser.add_argument("--mode", choices=("auto", "strict"), default="auto")
     parser.add_argument(
         "--schedule-search",
         choices=("bounded", "optimal", "greedy"),
@@ -60,7 +59,6 @@ def run(arguments: list[str] | None = None) -> int:
         source = args.input.read_text(encoding="utf-8")
         result = rewrite_text(
             source,
-            args.mode,
             args.iree_compile,
             sram_budget=args.sram_budget,
             schedule_search=args.schedule_search,
